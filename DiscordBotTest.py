@@ -109,21 +109,34 @@ async def on_message(message: discord.Message) -> None:
     if message.author.bot or not message.guild:
         return
 
-    new_level: int | None = add_xp(message.author.id)
+    # Commands and bot pings don't earn XP
+    ctx = await bot.get_context(message)
+    is_command = ctx.valid or message.content.startswith("!")
+    is_bot_ping = bot.user is not None and bot.user in message.mentions
 
-    if new_level is not None:
-        await message.channel.send(
-            f"Congratulations {message.author.mention}, you've leveled up to level {new_level}!"
-        )
+    # Award XP if it's a regular message
+    if not is_command and not is_bot_ping:
+        new_level: int | None = add_xp(message.author.id)
 
-        if new_level in ROLE_REPWARDS:
-            role_id: int = ROLE_REPWARDS[new_level]
-            role: discord.Role | None = message.guild.get_role(role_id)
-            if role and isinstance(message.author, discord.Member):
-                await message.author.add_roles(role)
-                await message.channel.send(
-                    f"{message.author.mention} has been awarded the role {role.name} for reaching level {new_level}!"
-                )
+        # If the user leveled up, send a congratulatory message and check for role rewards
+        if new_level is not None:
+            await message.channel.send(
+                f"Congratulations {message.author.mention}, you've leveled up to level {new_level}!"
+            )
+
+            # Check for role rewards
+            if new_level in ROLE_REPWARDS:
+                role_id: int = ROLE_REPWARDS[new_level]
+                role: discord.Role | None = message.guild.get_role(role_id)
+                if role and isinstance(message.author, discord.Member):
+                    try:
+                        await message.author.add_roles(role)
+                        await message.channel.send(
+                            f"{message.author.mention} has been awarded the role {role.name} for reaching level {new_level}!"
+                        )
+                    except discord.Forbidden:
+                        print(f"Can't assign {role.name}: move the bot's role above it.")
+
     await bot.process_commands(message)
 
 
@@ -222,9 +235,9 @@ async def main():
         except discord.HTTPException as e:
             if e.status == 429:
                 print(f"Rate limited by Cloudflare. Retrying in {delay}s...")
-                await bot.close()   # closes the leftover aiohttp connector
+                await bot.close()  # closes the leftover aiohttp connector
                 await asyncio.sleep(delay)
-                bot.clear()         # lets the bot log in again
+                bot.clear()  # lets the bot log in again
                 delay = min(delay * 2, 3600)
             else:
                 raise
