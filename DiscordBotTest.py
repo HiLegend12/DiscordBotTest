@@ -6,7 +6,7 @@ from typing import cast
 from aiohttp import web
 import discord
 from discord.ext import commands
-from discord.ext import app_commands
+from discord import app_commands
 from dotenv import load_dotenv
 import mysql.connector
 
