@@ -1,18 +1,13 @@
+import asyncio
 import os
 import random
 import time
 from typing import cast
-import discord
-from discord.ext import commands
-from dotenv import load_dotenv
-import mysql.connector
-import os
-import asyncio
-import discord
-from discord.ext import commands
-from dotenv import load_dotenv
-import mysql.connector
 from aiohttp import web
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+import mysql.connector
 
 load_dotenv()
 
@@ -35,17 +30,17 @@ async def start_web_server():
     print(f"Web server running on port {port}")
 
 
+# --- ENVIRONMENT & DATABASE CONFIGURATION ---
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 DB_HOST: str = os.getenv("DB_HOST", "localhost")
 DB_USER: str = os.getenv("DB_USER", "root")
 DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
-DB_NAME: str = os.getenv("DB_NAME", "discord_bot_test")
+DB_NAME: str = os.getenv("DB_NAME", "defaultdb")
+DB_PORT: int = int(os.getenv("DB_PORT", 3306))
 
-# Database connection setup
-db = mysql.connector.connect(
-    host=DB_HOST, user=DB_USER, password=DB_PASSWORD, database=DB_NAME
-)
-cursor = db.cursor()
+# Database connection object (initialized in main)
+db = None
+cursor = None
 
 ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
 
@@ -57,16 +52,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 def add_xp(user_id: int) -> int | None:
     """Add XP to a user and check for level up."""
-    # Get the current time
     current_time: float = time.time()
 
-    # Fetch the user's current XP, level, and last message time from the database
     cursor.execute(
         "SELECT xp, level, last_message FROM user_info WHERE user_id = %s", (user_id,)
     )
     result = cast(tuple[int, int, float] | None, cursor.fetchone())
 
-    # If the user is not found in the database, insert a new record with initial values
     if result is None:
         cursor.execute(
             "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
@@ -78,9 +70,8 @@ def add_xp(user_id: int) -> int | None:
         xp, level, last_message = result
 
         if current_time - last_message < 10:
-            return None  # User has sent a message within the last minute, no XP awarded
+            return None
 
-    # Award XP and check for level up
     gained_xp: int = random.randint(10, 20)
     new_xp: int = xp + gained_xp
     needed_xp: int = 100 * (level**2)
@@ -90,7 +81,6 @@ def add_xp(user_id: int) -> int | None:
         level += 1
         leveled_up = True
 
-    # Save the new XP, level, and last message time to the database
     cursor.execute(
         "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
         + "WHERE user_id = %s",
@@ -99,20 +89,18 @@ def add_xp(user_id: int) -> int | None:
     db.commit()
 
     if leveled_up:
-        return level  # Return the new level if the user leveled up
-    return None  # Return None if the user did not level up
+        return level
+    return None
 
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming messages and award XP to users."""
     if message.author == bot.user or not message.guild:
-        return  # Ignore messages from the bot itself or DMs
+        return
 
-    # Award XP to the user and check for level up
     new_level: int | None = add_xp(message.author.id)
 
-    # If the user leveled up, send a congratulatory message
     if new_level is not None:
         await message.channel.send(
             f"Congratulations {message.author.mention}, you've leveled up to level {new_level}!"
@@ -134,30 +122,24 @@ async def rank(
     ctx: commands.Context[commands.Bot], member: discord.Member | None = None
 ) -> None:
     """Display the rank (level and XP) of a user."""
-    # Determine the target user (either the mentioned member or the command invoker)
     target: discord.Member | discord.User = member or ctx.author
 
-    # Fetch the user's XP and level from the database
     cursor.execute("SELECT xp, level FROM user_info WHERE user_id = %s", (target.id,))
     result = cast(tuple[int, int] | None, cursor.fetchone())
 
-    # If the user is not found in the database, inform the command invoker
     if result is None:
         await ctx.send(
             f"{target.display_name} either doesn't exist or hasn't earned any XP yet."
         )
         return
 
-    # Unpack the result and calculate needed XP for the next level
     xp, level = result
     needed_xp: int = 100 * (level**2)
 
-    # Set embed colour to user's colour
     embed_colour: discord.Color = (
         target.color if target.color.value != 0 else discord.Color.from_rgb(0, 0, 0)
     )
 
-    # Create an embed to display the user's rank information
     embed = discord.Embed(title=f"{target.display_name}'s Rank", color=embed_colour)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="Level", value=str(level), inline=True)
@@ -169,42 +151,50 @@ async def rank(
 @bot.command()
 async def leaderboard(ctx: commands.Context[commands.Bot]) -> None:
     """Display the top 10 users on the leaderboard."""
-    # Fetch the top 10 users from the database, ordered by level and XP
     cursor.execute(
         "SELECT user_id, xp, level FROM user_info ORDER BY level DESC, xp DESC LIMIT 10"
     )
     results = cast(list[tuple[int, int, int]] | None, cursor.fetchall())
 
-    # If there are no results, inform the user that no data has been recorded yet
     if not results:
         await ctx.send("No data recorded yet.")
         return
 
-    # Create an embed for the leaderboard
     embed = discord.Embed(title="Leaderboard", color=discord.Color.gold())
 
-    # Build the leaderboard description with user mentions and their ranks
     description = ""
-    for rank, (user_id, xp, level) in enumerate(results, start=1):
+    for rank_num, (user_id, xp, level) in enumerate(results, start=1):
         user = await bot.fetch_user(user_id)
-        description += f"{rank}. <@{user.id}> - **Level: {level}**, XP: {xp}\n"
+        description += f"{rank_num}. <@{user.id}> - **Level: {level}**, XP: {xp}\n"
 
-    # Set the description of the embed and send it to the channel
     embed.description = description
     await ctx.send(embed=embed)
 
 
 @bot.event
 async def on_ready():
-    print("Logged in")
+    print("Logged in as", bot.user)
 
 
 async def main():
-    # Start the dummy web server task
+    global db, cursor
+
+    # 1. Start the web server immediately for Render health checks
     asyncio.create_task(start_web_server())
 
-    # Start your Discord bot
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    # 2. Connect to MySQL database using the correct port
+    print(f"Connecting to database {DB_HOST}:{DB_PORT}...")
+    db = mysql.connector.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+    )
+    cursor = db.cursor()
+    print("Database connected successfully!")
+
+    # 3. Start Discord bot
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing!")
     await bot.start(BOT_TOKEN)
