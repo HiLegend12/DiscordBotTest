@@ -145,7 +145,7 @@ async def on_message(message: discord.Message) -> None:
     await bot.process_commands(message)
 
 
-@bot.hybrid_command()
+@bot.hybrid_command(name="rank", description="Display the rank (level and XP) of a user.")
 async def rank(
     ctx: commands.Context[commands.Bot], member: discord.Member | None = None
 ) -> None:
@@ -181,7 +181,11 @@ async def rank(
     await ctx.send(embed=embed)
 
 
-@bot.hybrid_command()
+@bot.hybrid_command(
+    name="leaderboard",
+    description="Display the top 10 users on the leaderboard.",
+    aliases=["lb"],
+)
 async def leaderboard(ctx: commands.Context[commands.Bot]) -> None:
     """Display the top 10 users on the leaderboard."""
     cursor = get_cursor()
