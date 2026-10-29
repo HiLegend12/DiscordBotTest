@@ -6,8 +6,34 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import mysql.connector
+import os
+import asyncio
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+import mysql.connector
+from aiohttp import web
 
-load_dotenv()  # Load environment variables from .env file
+load_dotenv()
+
+
+# --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---
+async def handle_ping(request):
+    return web.Response(text="Bot is alive!")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    # Render assigns a PORT dynamically via environment variable
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server running on port {port}")
+
 
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 DB_HOST: str = os.getenv("DB_HOST", "localhost")
@@ -82,16 +108,16 @@ async def on_message(message: discord.Message) -> None:
     """Handle incoming messages and award XP to users."""
     if message.author == bot.user or not message.guild:
         return  # Ignore messages from the bot itself or DMs
-    
+
     # Award XP to the user and check for level up
     new_level: int | None = add_xp(message.author.id)
-    
+
     # If the user leveled up, send a congratulatory message
     if new_level is not None:
         await message.channel.send(
             f"Congratulations {message.author.mention}, you've leveled up to level {new_level}!"
         )
-        
+
         if new_level in ROLE_REPWARDS:
             role_id: int = ROLE_REPWARDS[new_level]
             role: discord.Role | None = message.guild.get_role(role_id)
@@ -102,8 +128,11 @@ async def on_message(message: discord.Message) -> None:
                 )
     await bot.process_commands(message)
 
+
 @bot.command()
-async def rank(ctx: commands.Context[commands.Bot], member: discord.Member | None = None) -> None:
+async def rank(
+    ctx: commands.Context[commands.Bot], member: discord.Member | None = None
+) -> None:
     """Display the rank (level and XP) of a user."""
     # Determine the target user (either the mentioned member or the command invoker)
     target: discord.Member | discord.User = member or ctx.author
@@ -114,48 +143,52 @@ async def rank(ctx: commands.Context[commands.Bot], member: discord.Member | Non
 
     # If the user is not found in the database, inform the command invoker
     if result is None:
-        await ctx.send(f"{target.display_name} either doesn't exist or hasn't earned any XP yet.")
+        await ctx.send(
+            f"{target.display_name} either doesn't exist or hasn't earned any XP yet."
+        )
         return
 
     # Unpack the result and calculate needed XP for the next level
     xp, level = result
-    needed_xp: int = 100 * (level**2)  
-    
+    needed_xp: int = 100 * (level**2)
+
     # Set embed colour to user's colour
-    embed_colour: discord.Color = target.color if target.color.value != 0 else discord.Color.from_rgb(0, 0, 0)
-    
-    # Create an embed to display the user's rank information
-    embed = discord.Embed(
-        title=f"{target.display_name}'s Rank",
-        color=embed_colour
+    embed_colour: discord.Color = (
+        target.color if target.color.value != 0 else discord.Color.from_rgb(0, 0, 0)
     )
+
+    # Create an embed to display the user's rank information
+    embed = discord.Embed(title=f"{target.display_name}'s Rank", color=embed_colour)
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="Level", value=str(level), inline=True)
     embed.add_field(name="XP", value=f"{xp}/{needed_xp}", inline=True)
 
     await ctx.send(embed=embed)
 
+
 @bot.command()
 async def leaderboard(ctx: commands.Context[commands.Bot]) -> None:
     """Display the top 10 users on the leaderboard."""
     # Fetch the top 10 users from the database, ordered by level and XP
-    cursor.execute("SELECT user_id, xp, level FROM user_info ORDER BY level DESC, xp DESC LIMIT 10")
+    cursor.execute(
+        "SELECT user_id, xp, level FROM user_info ORDER BY level DESC, xp DESC LIMIT 10"
+    )
     results = cast(list[tuple[int, int, int]] | None, cursor.fetchall())
-    
+
     # If there are no results, inform the user that no data has been recorded yet
     if not results:
         await ctx.send("No data recorded yet.")
         return
-    
+
     # Create an embed for the leaderboard
     embed = discord.Embed(title="Leaderboard", color=discord.Color.gold())
-    
+
     # Build the leaderboard description with user mentions and their ranks
     description = ""
     for rank, (user_id, xp, level) in enumerate(results, start=1):
         user = await bot.fetch_user(user_id)
         description += f"{rank}. <@{user.id}> - **Level: {level}**, XP: {xp}\n"
-    
+
     # Set the description of the embed and send it to the channel
     embed.description = description
     await ctx.send(embed=embed)
@@ -166,10 +199,16 @@ async def on_ready():
     print("Logged in")
 
 
-if __name__ == "__main__":
-    if not BOT_TOKEN:
-        raise ValueError(
-            "BOT_TOKEN is missing! Make sure it is defined in your .env or server environment variables."
-        )
+async def main():
+    # Start the dummy web server task
+    asyncio.create_task(start_web_server())
 
-    bot.run(BOT_TOKEN)
+    # Start your Discord bot
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN is missing!")
+    await bot.start(BOT_TOKEN)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
