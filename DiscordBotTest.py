@@ -38,9 +38,8 @@ DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 DB_NAME: str = os.getenv("DB_NAME", "defaultdb")
 DB_PORT: int = int(os.getenv("DB_PORT", 3306))
 
-# Database connection object (initialized in main)
-db = None
-cursor = None
+
+db: mysql.connector.MySQLConnection | None = None
 
 ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
 
@@ -50,53 +49,64 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+def get_cursor():
+    """Ping the DB (reconnecting if needed) and return a fresh cursor."""
+    assert db is not None, "Database not connected"
+    db.ping(reconnect=True, attempts=3, delay=1)
+    return db.cursor()
+
+
 def add_xp(user_id: int) -> int | None:
     """Add XP to a user and check for level up."""
-    current_time: float = time.time()
+    cursor = get_cursor()
+    try:
+        current_time: float = time.time()
 
-    cursor.execute(
-        "SELECT xp, level, last_message FROM user_info WHERE user_id = %s", (user_id,)
-    )
-    result = cast(tuple[int, int, float] | None, cursor.fetchone())
-
-    if result is None:
         cursor.execute(
-            "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
-            (user_id, 0, 0, current_time),
+            "SELECT xp, level, last_message FROM user_info WHERE user_id = %s",
+            (user_id,),
+        )
+        result = cast(tuple[int, int, float] | None, cursor.fetchone())
+
+        if result is None:
+            cursor.execute(
+                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
+                (user_id, 0, 0, current_time),
+            )
+            db.commit()
+            xp, level, last_message = 0, 0, current_time
+        else:
+            xp, level, last_message = result
+
+            if current_time - last_message < 10:
+                return None
+
+        gained_xp: int = random.randint(10, 20)
+        new_xp: int = xp + gained_xp
+        # Level 0 needs 0 XP on purpose: every new user levels up to 1 on their first message
+        needed_xp: int = 100 * (level**2)
+
+        leveled_up: bool = False
+        if new_xp >= needed_xp:
+            level += 1
+            leveled_up = True
+
+        cursor.execute(
+            "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
+            "WHERE user_id = %s",
+            (new_xp, level, current_time, user_id),
         )
         db.commit()
-        xp, level, last_message = 0, 0, current_time
-    else:
-        xp, level, last_message = result
 
-        if current_time - last_message < 10:
-            return None
-
-    gained_xp: int = random.randint(10, 20)
-    new_xp: int = xp + gained_xp
-    needed_xp: int = 100 * (level**2)
-
-    leveled_up: bool = False
-    if new_xp >= needed_xp:
-        level += 1
-        leveled_up = True
-
-    cursor.execute(
-        "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
-        + "WHERE user_id = %s",
-        (new_xp, level, current_time, user_id),
-    )
-    db.commit()
-
-    if leveled_up:
-        return level
-    return None
+        return level if leveled_up else None
+    finally:
+        cursor.close()
 
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming messages and award XP to users."""
-    if message.author == bot.user or not message.guild:
+    if message.author.bot or not message.guild:
         return
 
     new_level: int | None = add_xp(message.author.id)
@@ -123,9 +133,14 @@ async def rank(
 ) -> None:
     """Display the rank (level and XP) of a user."""
     target: discord.Member | discord.User = member or ctx.author
-
-    cursor.execute("SELECT xp, level FROM user_info WHERE user_id = %s", (target.id,))
-    result = cast(tuple[int, int] | None, cursor.fetchone())
+    cursor = get_cursor()
+    try:
+        cursor.execute(
+            "SELECT xp, level FROM user_info WHERE user_id = %s", (target.id,)
+        )
+        result = cast(tuple[int, int] | None, cursor.fetchone())
+    finally:
+        cursor.close()
 
     if result is None:
         await ctx.send(
@@ -151,11 +166,14 @@ async def rank(
 @bot.command()
 async def leaderboard(ctx: commands.Context[commands.Bot]) -> None:
     """Display the top 10 users on the leaderboard."""
-    cursor.execute(
-        "SELECT user_id, xp, level FROM user_info ORDER BY level DESC, xp DESC LIMIT 10"
-    )
-    results = cast(list[tuple[int, int, int]] | None, cursor.fetchall())
-
+    cursor = get_cursor()
+    try:
+        cursor.execute(
+            "SELECT user_id, xp, level FROM user_info ORDER BY level DESC, xp DESC LIMIT 10"
+        )
+        results = cast(list[tuple[int, int, int]] | None, cursor.fetchall())
+    finally:
+        cursor.close()
     if not results:
         await ctx.send("No data recorded yet.")
         return
@@ -164,8 +182,7 @@ async def leaderboard(ctx: commands.Context[commands.Bot]) -> None:
 
     description = ""
     for rank_num, (user_id, xp, level) in enumerate(results, start=1):
-        user = await bot.fetch_user(user_id)
-        description += f"{rank_num}. <@{user.id}> - **Level: {level}**, XP: {xp}\n"
+        description += f"{rank_num}. <@{user_id}> - **Level: {level}**, XP: {xp}\n"
 
     embed.description = description
     await ctx.send(embed=embed)
@@ -177,12 +194,12 @@ async def on_ready():
 
 
 async def main():
-    global db, cursor
+    global db
 
-    # 1. Start the web server immediately for Render health checks
+    # Start the web server in the background
     asyncio.create_task(start_web_server())
 
-    # 2. Connect to MySQL database using the correct port
+    # Connect to the database
     print(f"Connecting to database {DB_HOST}:{DB_PORT}...")
     db = mysql.connector.connect(
         host=DB_HOST,
@@ -191,13 +208,26 @@ async def main():
         password=DB_PASSWORD,
         database=DB_NAME,
     )
-    cursor = db.cursor()
     print("Database connected successfully!")
 
-    # 3. Start Discord bot
+    # Start the Discord bot with retry logic for rate limiting
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing!")
-    await bot.start(BOT_TOKEN)
+
+    delay = 600  # start with 10 minutes
+    while True:
+        try:
+            await bot.start(BOT_TOKEN)
+            break
+        except discord.HTTPException as e:
+            if e.status == 429:
+                print(f"Rate limited by Cloudflare. Retrying in {delay}s...")
+                await bot.close()   # closes the leftover aiohttp connector
+                await asyncio.sleep(delay)
+                bot.clear()         # lets the bot log in again
+                delay = min(delay * 2, 3600)
+            else:
+                raise
 
 
 if __name__ == "__main__":
