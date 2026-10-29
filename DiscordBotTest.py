@@ -6,6 +6,7 @@ from typing import cast
 from aiohttp import web
 import discord
 from discord.ext import commands
+from discord.ext import app_commands
 from dotenv import load_dotenv
 import mysql.connector
 
@@ -106,7 +107,6 @@ def add_xp(user_id: int) -> int | None:
     finally:
         cursor.close()
 
-
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming messages and award XP to users."""
@@ -145,7 +145,7 @@ async def on_message(message: discord.Message) -> None:
     await bot.process_commands(message)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def rank(
     ctx: commands.Context[commands.Bot], member: discord.Member | None = None
 ) -> None:
@@ -181,7 +181,7 @@ async def rank(
     await ctx.send(embed=embed)
 
 
-@bot.command()
+@bot.hybrid_command()
 async def leaderboard(ctx: commands.Context[commands.Bot]) -> None:
     """Display the top 10 users on the leaderboard."""
     cursor = get_cursor()
