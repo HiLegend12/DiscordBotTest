@@ -47,6 +47,7 @@ DB_PORT: int = int(os.getenv("DB_PORT", 3306))
 db: mysql.connector.MySQLConnection | None = None
 
 ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
+MY_GUILD = discord.Object(id=1564821894081941534)
 
 # Discord bot setup
 intents = discord.Intents.default()
@@ -88,13 +89,9 @@ def add_xp(user_id: int) -> int | None:
 
         gained_xp: int = random.randint(10, 20)
         new_xp: int = xp + gained_xp
-        # Level 0 needs 0 XP on purpose: every new user levels up to 1 on their first message
-        needed_xp: int = 100 * (level**2)
-
-        leveled_up: bool = False
-        if new_xp >= needed_xp:
-            level += 1
-            leveled_up = True
+        
+        # Replace the manual math with your new helper function
+        level, leveled_up = calculate_new_level(new_xp, level)
 
         cursor.execute(
             "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
@@ -106,6 +103,7 @@ def add_xp(user_id: int) -> int | None:
         return level if leveled_up else None
     finally:
         cursor.close()
+
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
@@ -140,12 +138,16 @@ async def on_message(message: discord.Message) -> None:
                             f"{message.author.mention} has been awarded the role {role.name} for reaching level {new_level}!"
                         )
                     except discord.Forbidden:
-                        print(f"Can't assign {role.name}: move the bot's role above it.")
+                        print(
+                            f"Can't assign {role.name}: move the bot's role above it."
+                        )
 
     await bot.process_commands(message)
 
 
-@bot.hybrid_command(name="rank", description="Display the rank (level and XP) of a user.")
+@bot.hybrid_command(
+    name="rank", description="Display the rank (level and XP) of a user."
+)
 async def rank(
     ctx: commands.Context[commands.Bot], member: discord.Member | None = None
 ) -> None:
@@ -210,9 +212,71 @@ async def leaderboard(ctx: commands.Context[commands.Bot]) -> None:
     await ctx.send(embed=embed)
 
 
+@bot.hybrid_command(name="delay", description="Check the bot's latency.")
+async def delay(ctx: commands.Context[commands.Bot]) -> None:
+    """Check the bot's latency."""
+    latency_ms: float = bot.latency * 1000
+    await ctx.send(f"Latency is {latency_ms:.2f} ms.")
+
+
+@bot.hybrid_command(name="daily", description="Claim your daily XP reward.")
+@commands.cooldown(1, 86400, commands.BucketType.user)
+async def daily(ctx: commands.Context[commands.Bot]) -> None:
+    user_id: int = ctx.author.id
+    daily_reward: int = random.randint(100, 175)
+    current_time: float = time.time()
+
+    cursor = get_cursor()
+    try:
+        cursor.execute("SELECT xp, level FROM user_info WHERE user_id = %s", (user_id,))
+        result = cast(tuple[int, int] | None, cursor.fetchone())
+
+        if result is None:
+            cursor.execute(
+                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
+                (user_id, daily_reward, 1, current_time) 
+            )
+            db.commit()
+            await ctx.send(f"Welcome {ctx.author.mention}! You claimed your first daily reward of **{daily_reward} XP** and reached **Level 1**!")
+            return
+
+        xp, level = result
+        new_xp: int = xp + daily_reward
+        level, leveled_up = calculate_new_level(new_xp, level)
+
+        cursor.execute(
+            "UPDATE user_info SET xp = %s, level = %s, last_message = %s WHERE user_id = %s",
+            (new_xp, level, current_time, user_id)
+        )
+        db.commit()
+        await ctx.send(f"Daily reward claimed! You received **{daily_reward} XP**.")
+
+    finally:
+        cursor.close()
+        
+@daily.error
+async def daily_error(ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
+    if isinstance(error, commands.CommandOnCooldown):
+        remaining_time: float = error.retry_after
+        hours, remainder = divmod(remaining_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        await ctx.send(
+            f"Daily reward is on cooldown. Please try again in {int(hours)}h {int(minutes)}m {int(seconds)}s."
+        )
+    else:
+        await ctx.send("An error occurred while trying to claim your daily reward.")
+
+
 @bot.event
 async def on_ready():
     print("Logged in as", bot.user)
+    try:
+        # Sync to a specific server instantly
+        bot.tree.copy_global_to(guild=MY_GUILD)
+        synced = await bot.tree.sync(guild=MY_GUILD)
+        print(f"Synced {len(synced)} command(s) to test server.")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
 
 
 async def main():
@@ -250,6 +314,18 @@ async def main():
                 delay = min(delay * 2, 3600)
             else:
                 raise
+
+def calculate_new_level(xp: int, current_level: int) -> tuple[int, bool]:
+    """Calculate if the current XP pushes the user to one or more new levels."""
+    new_level: int = current_level
+    leveled_up: bool = False
+    
+    # Using a while loop catches massive XP bursts that span multiple levels
+    while xp >= 100 * (new_level ** 2):
+        new_level += 1
+        leveled_up = True
+        
+    return new_level, leveled_up
 
 
 if __name__ == "__main__":
