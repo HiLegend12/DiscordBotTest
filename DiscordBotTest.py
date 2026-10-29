@@ -14,7 +14,11 @@ load_dotenv()
 
 # --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---
 async def handle_ping(request):
-    return web.Response(text="Bot is alive!")
+    if bot.is_ready():
+        return web.Response(text="Bot is alive and connected!")
+    return web.Response(
+        text="Web server up, but bot is NOT connected to Discord", status=503
+    )
 
 
 async def start_web_server():
