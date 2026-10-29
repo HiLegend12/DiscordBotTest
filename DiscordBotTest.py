@@ -110,6 +110,7 @@ def add_xp(user_id: int) -> int | None:
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming messages and award XP to users."""
+    print(f"on_message fired: {message.author} said {message.content!r}")
     if message.author.bot or not message.guild:
         return
 
