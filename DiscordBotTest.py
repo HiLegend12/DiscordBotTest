@@ -1,17 +1,27 @@
-# Code: MTU2NDgyMTAyMzQwMzI4NjU5MA.GX_Rg6.3-xWZYUO4Z-1tB6Va4K0GZWPhnoptwZqglqIMg
-
+import os
+import random
+import time
+from typing import cast
 import discord
 from discord.ext import commands
-import time
-import random
-from typing import cast
+from dotenv import load_dotenv
 import mysql.connector
+
+load_dotenv()  # Load environment variables from .env file
+
+BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+DB_HOST: str = os.getenv("DB_HOST", "localhost")
+DB_USER: str = os.getenv("DB_USER", "root")
+DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+DB_NAME: str = os.getenv("DB_NAME", "discord_bot_test")
 
 # Database connection setup
 db = mysql.connector.connect(
-    host="localhost", user="root", password="Redpenguin12*", database="discord_bot_test"
+    host=DB_HOST, user=DB_USER, password=DB_PASSWORD, database=DB_NAME
 )
 cursor = db.cursor()
+
+ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
 
 # Discord bot setup
 intents = discord.Intents.default()
@@ -81,6 +91,15 @@ async def on_message(message: discord.Message) -> None:
         await message.channel.send(
             f"Congratulations {message.author.mention}, you've leveled up to level {new_level}!"
         )
+        
+        if new_level in ROLE_REPWARDS:
+            role_id: int = ROLE_REPWARDS[new_level]
+            role: discord.Role | None = message.guild.get_role(role_id)
+            if role and isinstance(message.author, discord.Member):
+                await message.author.add_roles(role)
+                await message.channel.send(
+                    f"{message.author.mention} has been awarded the role {role.name} for reaching level {new_level}!"
+                )
     await bot.process_commands(message)
 
 @bot.command()
@@ -101,11 +120,14 @@ async def rank(ctx: commands.Context[commands.Bot], member: discord.Member | Non
     # Unpack the result and calculate needed XP for the next level
     xp, level = result
     needed_xp: int = 100 * (level**2)  
-
+    
+    # Set embed colour to user's colour
+    embed_colour: discord.Color = target.color if target.color.value != 0 else discord.Color.from_rgb(0, 0, 0)
+    
     # Create an embed to display the user's rank information
     embed = discord.Embed(
         title=f"{target.display_name}'s Rank",
-        color=discord.Color.gold()
+        color=embed_colour
     )
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="Level", value=str(level), inline=True)
@@ -145,4 +167,9 @@ async def on_ready():
 
 
 if __name__ == "__main__":
-    bot.run("MTU2NDgyMTAyMzQwMzI4NjU5MA.GX_Rg6.3-xWZYUO4Z-1tB6Va4K0GZWPhnoptwZqglqIMg")
+    if not BOT_TOKEN:
+        raise ValueError(
+            "BOT_TOKEN is missing! Make sure it is defined in your .env or server environment variables."
+        )
+
+    bot.run(BOT_TOKEN)
