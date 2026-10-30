@@ -9,6 +9,9 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 import mysql.connector
+import io
+from PIL import Image, ImageDraw, ImageFont
+import unicodedata
 
 load_dotenv()
 
@@ -153,6 +156,10 @@ async def rank(
 ) -> None:
     """Display the rank (level and XP) of a user."""
     target: discord.Member | discord.User = member or ctx.author
+
+    # Optional: Send a "thinking" state since image generation takes a split second
+    await ctx.defer()
+
     cursor = get_cursor()
     try:
         cursor.execute(
@@ -162,25 +169,27 @@ async def rank(
     finally:
         cursor.close()
 
+    # If the user has no data, default to 0 XP and level 0
     if result is None:
-        await ctx.send(
-            f"{target.display_name} either doesn't exist or hasn't earned any XP yet."
-        )
-        return
-
-    xp, level = result
+        xp = 0
+        level = 0
+    else:
+        xp, level = result
     needed_xp: int = 100 * (level**2)
 
-    embed_colour: discord.Color = (
-        target.color if target.color.value != 0 else discord.Color.from_rgb(0, 0, 0)
-    )
+    # Find username colour, defaulting to white if no color is set
+    hex_color: str = str(target.color) if target.color.value != 0 else "#ffffff"
 
-    embed = discord.Embed(title=f"{target.display_name}'s Rank", color=embed_colour)
-    embed.set_thumbnail(url=target.display_avatar.url)
-    embed.add_field(name="Level", value=str(level), inline=True)
-    embed.add_field(name="XP", value=f"{xp}/{needed_xp}", inline=True)
+    # Fetch the avatar as raw bytes directly from Discord
+    avatar_bytes = await target.display_avatar.with_size(256).with_format("png").read()
 
-    await ctx.send(embed=embed)
+    # Generate the rank card image in a separate thread to avoid blocking the event loop
+    image_buffer = await asyncio.to_thread(
+        generate_rank_card, target.display_name, avatar_bytes, level, xp, needed_xp, hex_color)
+
+    # Convert the buffer into a Discord File object and send it
+    file = discord.File(fp=image_buffer, filename="rank_card.png")
+    await ctx.send(file=file)
 
 
 @bot.hybrid_command(
@@ -253,7 +262,7 @@ async def daily(ctx: commands.Context[commands.Bot]) -> None:
 
     finally:
         cursor.close()
-        
+
 @daily.error
 async def daily_error(ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
     if isinstance(error, commands.CommandOnCooldown):
@@ -327,6 +336,63 @@ def calculate_new_level(xp: int, current_level: int) -> tuple[int, bool]:
         
     return new_level, leveled_up
 
+def generate_rank_card(username: str, avatar_bytes: bytes, level: int, xp: int, needed_xp: int, bar_color: str) -> io.BytesIO:
+    """Generate a rank card image for the user."""
+    # Create a blank image
+    width, height = 800, 250
+    background = Image.new("RGB", (width, height), color=(54, 57, 63))
+    draw = ImageDraw.Draw(background)
+
+    # Load avatar
+    avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+    avatar = avatar.resize((150, 150))
+
+    # Create a circular mask for the avatar
+    mask = Image.new("L", (150, 150), 0)  # "L" mode is for grayscale/transparency
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.ellipse((0, 0, 150, 150), fill=255)  # Draw a solid white circle
+
+    # Paste the avatar using the mask to cut it into a circle
+    background.paste(avatar, (50, 50), mask)
+
+    # Set up fonts
+    font_large = ImageFont.truetype("Segoe-UI-Symbol.ttf", 40)
+    font_small = ImageFont.truetype("Segoe-UI-Symbol.ttf", 25)
+
+    clean_username = unicodedata.normalize("NFKC", username)
+
+    # Draw text
+    draw.text((230, 60), clean_username, font=font_large, fill=(255, 255, 255))
+    draw.text((230, 120), f"Level: {level}", font=font_small, fill=(170, 170, 170))
+    draw.text((600, 120), f"XP: {xp}/{needed_xp}", font=font_small, fill=(170, 170, 170))
+
+    # Define XP Bar dimensions
+    bar_x, bar_y = 230, 170
+    bar_width, bar_height = 520, 30
+
+    # Calculate the filled portion of the XP bar
+    percentage = xp / needed_xp if needed_xp > 0 else 0
+    percentage = min(percentage, 1.0)
+    fill_width = int(bar_width * percentage)
+
+    # Draw the XP bar background and filled portion
+    draw.rounded_rectangle(
+        [(bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height)],
+        radius=15,
+        fill='#1e1f22',
+    )
+    if fill_width > 0:
+        draw.rounded_rectangle(
+            [(bar_x, bar_y), (bar_x + fill_width, bar_y + bar_height)],
+            radius=15,
+            fill=bar_color,
+        )
+
+    # Save the image to a BytesIO buffer
+    buffer = io.BytesIO()
+    background.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
 
 if __name__ == "__main__":
     asyncio.run(main())
