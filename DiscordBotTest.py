@@ -6,12 +6,10 @@ from typing import cast
 from aiohttp import web
 import discord
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 import mysql.connector
-from mysql.connector.abstracts import (
-    MySQLConnectionAbstract,
-    MySQLCursorAbstract
-)
+from mysql.connector.abstracts import MySQLConnectionAbstract, MySQLCursorAbstract
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import unicodedata
@@ -42,8 +40,8 @@ db = cast(
 # Define globals
 ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
 MY_GUILD = discord.Object(id=1564821894081941534)
-FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "NotoSans-Regular.ttf")
-DAILY_COOLDOWN: int = 86400  # 24 hours: minimum time between claims
+FONT_PATH = os.path.join(os.path.dirname(__file__), "NotoSans-Regular.ttf")
+DAILY_COOLDOWN: int = 10  # 24 hours: minimum time between claims
 STREAK_WINDOW: int = 172800
 
 # Discord bot setup
@@ -114,9 +112,9 @@ async def rank(
     """Display the rank (level and XP) of a user."""
     target: discord.Member | discord.User = member or ctx.author
 
-    # Optional: Send a "thinking" state since image generation takes a split second
     await ctx.defer()
 
+    #
     cursor = get_cursor()
     try:
         cursor.execute(
@@ -142,7 +140,6 @@ async def rank(
     avatar_bytes = await target.display_avatar.with_size(256).with_format("png").read()
 
     # Generate the rank card image in a separate thread to avoid blocking the event loop
-    print(f"Raw username: {ascii(target.display_name)}")
     image_buffer = await asyncio.to_thread(
         generate_rank_card, target.display_name, avatar_bytes, xp, level, user_colour
     )
@@ -261,24 +258,8 @@ async def on_ready():
 
 
 async def main():
-    global db
-
     # Start the web server in the background
     asyncio.create_task(start_web_server())
-
-    # Connect to the database
-    print(f"Connecting to database {DB_HOST}:{DB_PORT}...")
-    db = cast(
-        MySQLConnectionAbstract,
-        mysql.connector.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-        )
-    )
-    print("Database connected successfully!")
 
     # Start the Discord bot with retry logic for rate limiting
     if not BOT_TOKEN:
@@ -302,6 +283,7 @@ async def main():
 
 # ----------- ADMIN COMMANDS -----------
 @bot.hybrid_command(name="givexp", description="[ADMIN] Give XP to a user.")
+@app_commands.default_permissions(administrator=True)
 @commands.has_permissions(administrator=True)
 async def givexp(
     ctx: commands.Context[commands.Bot], member: discord.Member, xp_amount: int
@@ -314,45 +296,31 @@ async def givexp(
 
     cursor = get_cursor()
     try:
-        current_time: float = time.time()
-
-        # Check if the user exists in the database
+        ensure_user_exists(cursor, member.id)
         cursor.execute(
             "SELECT xp, level FROM user_info WHERE user_id = %s", (member.id,)
         )
-        result = cast(tuple[int, int] | None, cursor.fetchone())
+        xp, level = cast(tuple[int, int], cursor.fetchone())
 
-        # If the user doesn't exist, insert them into the database with the given XP
-        if result is None:
-            ensure_user_exists(cursor, member.id)
-            new_xp: int = xp_amount
-            new_level, _ = calculate_new_level(new_xp, 0)
-            cursor.execute(
-                "UPDATE user_info SET xp = %s, level = %s, last_message = %s WHERE user_id = %s",
-                (new_xp, new_level, current_time, member.id),
-            )
+        new_xp = xp + xp_amount
+        new_level, _ = calculate_new_level(new_xp, level)
 
-        # If the user exists, update their XP and level
-        else:
-            xp, level = result
-            new_xp: int = xp + xp_amount
-            new_level, _ = calculate_new_level(new_xp, level)
-            cursor.execute(
-                "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
-                (new_xp, new_level, member.id),
-            )
+        cursor.execute(
+            "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
+            (new_xp, new_level, member.id),
+        )
+        get_db().commit()
 
-        # Commit the changes to the database
-        db.commit()
+        await grant_level_roles(member, new_level)
         await ctx.send(
             f"Successfully gave **{xp_amount} XP** to {member.mention}. They are now **Level {new_level}** with **{new_xp} XP**."
         )
-
     finally:
         cursor.close()
 
 
 @bot.hybrid_command(name="setlevel", description="[ADMIN] Set a user's level.")
+@app_commands.default_permissions(administrator=True)
 @commands.has_permissions(administrator=True)
 async def setlevel(
     ctx: commands.Context[commands.Bot], member: discord.Member, new_level: int
@@ -365,32 +333,19 @@ async def setlevel(
 
     cursor = get_cursor()
     try:
-        current_time: float = time.time()
+        base_xp: int = 100 * ((new_level - 1) ** 2) if new_level > 0 else 0
 
-        base_xp: int = 100 * ((new_level - 1) ** 2)
-        cursor.execute("SELECT xp FROM user_info WHERE user_id = %s", (member.id,))
-        result = cursor.fetchone()
+        ensure_user_exists(cursor, member.id)
+        cursor.execute(
+            "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
+            (base_xp, new_level, member.id),
+        )
+        get_db().commit()
 
-        # If the user doesn't exist, insert them into the database with the new level and corresponding XP
-        if result is None:
-            ensure_user_exists(cursor, member.id)
-            cursor.execute(
-                "UPDATE user_info SET xp = %s, level = %s, last_message = %s WHERE user_id = %s",
-                (base_xp, new_level, current_time, member.id),
-            )
-        # If the user exists, update their level and XP
-        else:
-            cursor.execute(
-                "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
-                (base_xp, new_level, member.id),
-            )
-
-        # Commit the changes to the database
-        db.commit()
+        await grant_level_roles(member, new_level)
         await ctx.send(
             f"Successfully set {member.mention} to **Level {new_level}** ({base_xp} XP)."
         )
-
     finally:
         cursor.close()
 
@@ -460,18 +415,19 @@ def generate_rank_card(
         "RGB", (800, 250), color=(43, 45, 49)
     )  # Standard Discord dark theme color
     draw = ImageDraw.Draw(background)
-
+    
     # Load fonts, with a fallback to default if the specified font is not found
     try:
         font_large = ImageFont.truetype(FONT_PATH, 40)
         font_small = ImageFont.truetype(FONT_PATH, 25)
-    except OSError:
+    except OSError as e:
         # Fallback just in case the file gets moved
-        font_large = ImageFont.load_default()
-        font_small = ImageFont.load_default()
+        print(f"Font was unable to load: {e}")
+        font_large = ImageFont.load_default(size=40)
+        font_small = ImageFont.load_default(size=25)
 
     # Normalize the username to ensure consistent rendering
-    clean_username = username.replace("\u0454", "e")
+    clean_username = username.replace("\u0454", "e").replace("∂", "d")
     clean_username = unicodedata.normalize("NFKC", clean_username)
 
     # Calculate XP and level details for the progress bar
@@ -544,37 +500,29 @@ def add_xp(user_id: int) -> int | None:
     """Add XP to a user and check for level up."""
     cursor = get_cursor()
     try:
-        current_time: float = time.time()
-
+        ensure_user_exists(cursor, user_id)
         cursor.execute(
             "SELECT xp, level, last_message FROM user_info WHERE user_id = %s",
             (user_id,),
         )
-        result = cast(tuple[int, int, float] | None, cursor.fetchone())
+        xp, level, last_message = cast(tuple[int, int, float], cursor.fetchone())
 
-        if result is None:
-            ensure_user_exists(cursor, user_id)
-            xp, level, last_message = 0, 0, current_time
-        else:
-            xp, level, last_message = result
+        # Anti-spam: ignore messages sent within 10 seconds of the last XP gain
+        current_time = time.time()
+        if current_time - last_message < 10:
+            return None
 
-            if current_time - last_message < 10:
-                return None
-
-        gained_xp: int = random.randint(10, 20)
-        new_xp: int = xp + gained_xp
-
-        # Replace the manual math with your new helper function
-        level, leveled_up = calculate_new_level(new_xp, level)
+        new_xp = xp + random.randint(10, 20)
+        new_level, leveled_up = calculate_new_level(new_xp, level)
 
         cursor.execute(
             "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
             "WHERE user_id = %s",
-            (new_xp, level, current_time, user_id),
+            (new_xp, new_level, current_time, user_id),
         )
-        db.commit()
+        get_db().commit()
 
-        return level if leveled_up else None
+        return new_level if leveled_up else None
     finally:
         cursor.close()
 
