@@ -9,7 +9,7 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 import mysql.connector
-import io
+from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import unicodedata
 
@@ -57,57 +57,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
-def get_cursor():
-    """Ping the DB (reconnecting if needed) and return a fresh cursor."""
-    assert db is not None, "Database not connected"
-    db.ping(reconnect=True, attempts=3, delay=1)
-    return db.cursor()
-
-
-def add_xp(user_id: int) -> int | None:
-    """Add XP to a user and check for level up."""
-    cursor = get_cursor()
-    try:
-        current_time: float = time.time()
-
-        cursor.execute(
-            "SELECT xp, level, last_message FROM user_info WHERE user_id = %s",
-            (user_id,),
-        )
-        result = cast(tuple[int, int, float] | None, cursor.fetchone())
-
-        if result is None:
-            cursor.execute(
-                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
-                (user_id, 0, 0, current_time),
-            )
-            db.commit()
-            xp, level, last_message = 0, 0, current_time
-        else:
-            xp, level, last_message = result
-
-            if current_time - last_message < 10:
-                return None
-
-        gained_xp: int = random.randint(10, 20)
-        new_xp: int = xp + gained_xp
-        
-        # Replace the manual math with your new helper function
-        level, leveled_up = calculate_new_level(new_xp, level)
-
-        cursor.execute(
-            "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
-            "WHERE user_id = %s",
-            (new_xp, level, current_time, user_id),
-        )
-        db.commit()
-
-        return level if leveled_up else None
-    finally:
-        cursor.close()
-
-
+# ----------- USER COMMANDS -----------
 @bot.event
 async def on_message(message: discord.Message) -> None:
     """Handle incoming messages and award XP to users."""
@@ -175,17 +125,17 @@ async def rank(
         level = 0
     else:
         xp, level = result
-    needed_xp: int = 100 * (level**2)
 
     # Find username colour, defaulting to white if no color is set
-    hex_color: str = str(target.color) if target.color.value != 0 else "#ffffff"
+    user_colour: tuple[int, int, int] = target.color.to_rgb() if target.color.value != 0 else (255, 255, 255)
 
     # Fetch the avatar as raw bytes directly from Discord
     avatar_bytes = await target.display_avatar.with_size(256).with_format("png").read()
 
     # Generate the rank card image in a separate thread to avoid blocking the event loop
+    print(f"Raw username: {ascii(target.display_name)}")
     image_buffer = await asyncio.to_thread(
-        generate_rank_card, target.display_name, avatar_bytes, level, xp, needed_xp, hex_color)
+        generate_rank_card, target.display_name, avatar_bytes, xp, level, user_colour)
 
     # Convert the buffer into a Discord File object and send it
     file = discord.File(fp=image_buffer, filename="rank_card.png")
@@ -251,7 +201,7 @@ async def daily(ctx: commands.Context[commands.Bot]) -> None:
 
         xp, level = result
         new_xp: int = xp + daily_reward
-        level, leveled_up = calculate_new_level(new_xp, level)
+        level, _ = calculate_new_level(new_xp, level)
 
         cursor.execute(
             "UPDATE user_info SET xp = %s, level = %s, last_message = %s WHERE user_id = %s",
@@ -324,6 +274,103 @@ async def main():
             else:
                 raise
 
+
+# ----------- ADMIN COMMANDS -----------
+@bot.hybrid_command(name="givexp", description="[ADMIN] Give XP to a user.")
+@commands.has_permissions(administrator=True)
+async def givexp(ctx: commands.Context[commands.Bot], member: discord.Member, xp_amount: int) -> None:
+    """[ADMIN] Give XP to a user."""
+    # Check if the XP amount is positive
+    if xp_amount <= 0:
+        await ctx.send("Please provide a positive amount of XP to give.")
+        return
+
+    cursor = get_cursor()
+    try:
+        current_time: float = time.time()
+
+        # Check if the user exists in the database
+        cursor.execute("SELECT xp, level FROM user_info WHERE user_id = %s", (member.id,))
+        result = cast(tuple[int, int] | None, cursor.fetchone())
+
+        # If the user doesn't exist, insert them into the database with the given XP
+        if result is None:
+            cursor.execute(
+                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
+                (member.id, xp_amount, 0, current_time),
+            )
+        
+        # If the user exists, update their XP and level
+        else:
+            xp, level = result
+            new_xp: int = xp + xp_amount
+            new_level, _ = calculate_new_level(new_xp, level)
+            cursor.execute(
+                "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
+                (new_xp, new_level, member.id),
+            )
+
+        # Commit the changes to the database
+        db.commit()
+        await ctx.send(
+            f"Successfully gave **{xp_amount} XP** to {member.mention}. They are now **Level {new_level}** with **{new_xp} XP**."
+        )
+
+    finally:
+        cursor.close()
+
+
+@bot.hybrid_command(name="setlevel", description="[ADMIN] Set a user's level.")
+@commands.has_permissions(administrator=True)
+async def setlevel(ctx: commands.Context[commands.Bot], member: discord.Member, new_level: int) -> None:
+    """[ADMIN] Set a user's level."""
+    # Check if the new level is negative
+    if new_level < 0:
+        await ctx.send("Level cannot be negative.")
+        return
+
+    cursor = get_cursor()
+    try:
+        current_time: float = time.time()
+
+        base_xp: int = 100 * ((new_level - 1) ** 2)
+        cursor.execute("SELECT xp FROM user_info WHERE user_id = %s", (member.id,))
+        result = cursor.fetchone()
+
+        # If the user doesn't exist, insert them into the database with the new level and corresponding XP
+        if result is None:
+            cursor.execute(
+                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
+                (member.id, base_xp, new_level, current_time),
+            )
+        # If the user exists, update their level and XP
+        else:
+            cursor.execute(
+                "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
+                (base_xp, new_level, member.id),
+            )
+
+        # Commit the changes to the database
+        db.commit()
+        await ctx.send(
+            f"Successfully set {member.mention} to **Level {new_level}** ({base_xp} XP)."
+        )
+
+    finally:
+        cursor.close()
+
+
+@givexp.error
+@setlevel.error
+async def admin_command_error(
+    ctx: commands.Context[commands.Bot], error: commands.CommandError
+) -> None:
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You do not have permission to use this command.")
+
+
+# ----------- HELPER FUNCTIONS -----------
+
 def calculate_new_level(xp: int, current_level: int) -> tuple[int, bool]:
     """Calculate if the current XP pushes the user to one or more new levels."""
     new_level: int = current_level
@@ -336,63 +383,124 @@ def calculate_new_level(xp: int, current_level: int) -> tuple[int, bool]:
         
     return new_level, leveled_up
 
-def generate_rank_card(username: str, avatar_bytes: bytes, level: int, xp: int, needed_xp: int, bar_color: str) -> io.BytesIO:
-    """Generate a rank card image for the user."""
-    # Create a blank image
-    width, height = 800, 250
-    background = Image.new("RGB", (width, height), color=(54, 57, 63))
+def generate_rank_card(username: str, avatar_bytes: bytes, xp: int, level: int, user_colour: tuple[int, int, int]) -> BytesIO:
+    # Generate a rank card image for the user.
+    background = Image.new("RGB", (800, 250), color=(43, 45, 49)) # Standard Discord dark theme color
     draw = ImageDraw.Draw(background)
 
-    # Load avatar
-    avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+    # Load fonts, with a fallback to default if the specified font is not found
+    try:
+        font_large = ImageFont.truetype("seguisym.ttf", 40)
+        font_small = ImageFont.truetype("seguisym.ttf", 25)
+    except OSError:
+        # Fallback just in case the file gets moved
+        font_large = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+
+    # Normalize the username to ensure consistent rendering
+    clean_username = username.replace("\u0454", "e")
+    clean_username = unicodedata.normalize("NFKC", clean_username)
+
+    # Calculate XP and level details for the progress bar
+    current_level_xp = 100 * ((level - 1) ** 2) if level > 0 else 0
+    needed_xp = 100 * (level ** 2)
+
+    # Calculate how much XP the user has into the current level and the total XP needed for the next level
+    xp_into_level = xp - current_level_xp
+    xp_range = needed_xp - current_level_xp
+
+    # Progress bar percentage (0.0 to 1.0)
+    percentage = xp_into_level / xp_range if xp_range > 0 else 0
+    percentage = max(0.0, min(percentage, 1.0))
+
+    # Draw the avatar
+    avatar = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
     avatar = avatar.resize((150, 150))
+    
+    # Create a circular mask for the avatar to make it round
+    mask = Image.new("L", (150, 150), 0)
+    draw_mask = ImageDraw.Draw(mask)
+    draw_mask.ellipse((0, 0, 150, 150), fill=255)
+    background.paste(avatar, (40, 50), mask)
 
-    # Create a circular mask for the avatar
-    mask = Image.new("L", (150, 150), 0)  # "L" mode is for grayscale/transparency
-    mask_draw = ImageDraw.Draw(mask)
-    mask_draw.ellipse((0, 0, 150, 150), fill=255)  # Draw a solid white circle
+    # Draw the username and XP/level text
+    draw.text((230, 50), clean_username, font=font_large, fill=(255, 255, 255))
+    xp_text = f"Level {level}  |  {xp:,} Total XP  |  {xp_into_level:,} / {xp_range:,} XP"
+    draw.text((230, 115), xp_text, font=font_small, fill=(185, 187, 190))
 
-    # Paste the avatar using the mask to cut it into a circle
-    background.paste(avatar, (50, 50), mask)
-
-    # Set up fonts
-    font_large = ImageFont.truetype("Segoe-UI-Symbol.ttf", 40)
-    font_small = ImageFont.truetype("Segoe-UI-Symbol.ttf", 25)
-
-    clean_username = unicodedata.normalize("NFKC", username)
-
-    # Draw text
-    draw.text((230, 60), clean_username, font=font_large, fill=(255, 255, 255))
-    draw.text((230, 120), f"Level: {level}", font=font_small, fill=(170, 170, 170))
-    draw.text((600, 120), f"XP: {xp}/{needed_xp}", font=font_small, fill=(170, 170, 170))
-
-    # Define XP Bar dimensions
-    bar_x, bar_y = 230, 170
-    bar_width, bar_height = 520, 30
-
-    # Calculate the filled portion of the XP bar
-    percentage = xp / needed_xp if needed_xp > 0 else 0
-    percentage = min(percentage, 1.0)
+    # Draw the progress bar
+    bar_x, bar_y = 230, 165
+    bar_width, bar_height = 500, 30
     fill_width = int(bar_width * percentage)
-
-    # Draw the XP bar background and filled portion
     draw.rounded_rectangle(
-        [(bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height)],
-        radius=15,
-        fill='#1e1f22',
+        [bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], 
+        radius=15, 
+        fill=(30, 31, 34)
     )
-    if fill_width > 0:
+    if fill_width > 15:
         draw.rounded_rectangle(
-            [(bar_x, bar_y), (bar_x + fill_width, bar_y + bar_height)],
-            radius=15,
-            fill=bar_color,
+            [bar_x, bar_y, bar_x + fill_width, bar_y + bar_height], 
+            radius=15, 
+            fill=user_colour
         )
 
-    # Save the image to a BytesIO buffer
-    buffer = io.BytesIO()
+    # Save the image to a BytesIO buffer and return it
+    buffer = BytesIO()
     background.save(buffer, format="PNG")
     buffer.seek(0)
+    
     return buffer
+
+
+def get_cursor():
+    """Ping the DB (reconnecting if needed) and return a fresh cursor."""
+    assert db is not None, "Database not connected"
+    db.ping(reconnect=True, attempts=3, delay=1)
+    return db.cursor()
+
+
+def add_xp(user_id: int) -> int | None:
+    """Add XP to a user and check for level up."""
+    cursor = get_cursor()
+    try:
+        current_time: float = time.time()
+
+        cursor.execute(
+            "SELECT xp, level, last_message FROM user_info WHERE user_id = %s",
+            (user_id,),
+        )
+        result = cast(tuple[int, int, float] | None, cursor.fetchone())
+
+        if result is None:
+            cursor.execute(
+                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
+                (user_id, 0, 0, current_time),
+            )
+            db.commit()
+            xp, level, last_message = 0, 0, current_time
+        else:
+            xp, level, last_message = result
+
+            if current_time - last_message < 10:
+                return None
+
+        gained_xp: int = random.randint(10, 20)
+        new_xp: int = xp + gained_xp
+
+        # Replace the manual math with your new helper function
+        level, leveled_up = calculate_new_level(new_xp, level)
+
+        cursor.execute(
+            "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
+            "WHERE user_id = %s",
+            (new_xp, level, current_time, user_id),
+        )
+        db.commit()
+
+        return level if leveled_up else None
+    finally:
+        cursor.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

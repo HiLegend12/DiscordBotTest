@@ -2,3 +2,4 @@ discord.py
 mysql-connector-python
 python-dotenv
 aiohttp
+Pillow==10.3.0
