@@ -41,7 +41,7 @@ db = cast(
 ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
 MY_GUILD = discord.Object(id=1564821894081941534)
 FONT_PATH = os.path.join(os.path.dirname(__file__), "NotoSans-Regular.ttf")
-DAILY_COOLDOWN: int = 10  # 24 hours: minimum time between claims
+DAILY_COOLDOWN: int = 86400  # 24 hours: minimum time between claims
 STREAK_WINDOW: int = 172800
 
 # Discord bot setup
@@ -118,18 +118,21 @@ async def rank(
     cursor = get_cursor()
     try:
         cursor.execute(
-            "SELECT xp, level FROM user_info WHERE user_id = %s", (target.id,)
+            "SELECT xp, level, last_daily, daily_streak FROM user_info WHERE user_id = %s",
+            (target.id,),
         )
-        result = cast(tuple[int, int] | None, cursor.fetchone())
+        result = cast(tuple[int, int, float, int] | None, cursor.fetchone())
     finally:
         cursor.close()
 
     # If the user has no data, default to 0 XP and level 0
     if result is None:
-        xp = 0
-        level = 0
+        xp = level = streak = 0
     else:
-        xp, level = result
+        xp, level, last_daily, streak = result
+        
+        if time.time() - last_daily >= STREAK_WINDOW:
+            streak = 0
 
     # Find username colour, defaulting to white if no color is set
     user_colour: tuple[int, int, int] = (
@@ -141,7 +144,7 @@ async def rank(
 
     # Generate the rank card image in a separate thread to avoid blocking the event loop
     image_buffer = await asyncio.to_thread(
-        generate_rank_card, target.display_name, avatar_bytes, xp, level, user_colour
+        generate_rank_card, target.display_name, avatar_bytes, xp, level, user_colour, streak
     )
 
     # Convert the buffer into a Discord File object and send it
@@ -409,13 +412,14 @@ def generate_rank_card(
     xp: int,
     level: int,
     user_colour: tuple[int, int, int],
+    streak: int
 ) -> BytesIO:
     # Generate a rank card image for the user.
     background = Image.new(
         "RGB", (800, 250), color=(43, 45, 49)
     )  # Standard Discord dark theme color
     draw = ImageDraw.Draw(background)
-    
+
     # Load fonts, with a fallback to default if the specified font is not found
     try:
         font_large = ImageFont.truetype(FONT_PATH, 40)
@@ -459,6 +463,9 @@ def generate_rank_card(
     )
     draw.text((230, 115), xp_text, font=font_small, fill=(185, 187, 190))
 
+    # Draw the daily streak text
+    draw.text((230, 205), f"Daily streak: {streak}", font=font_small, fill=(185, 187, 190))
+    
     # Draw the progress bar
     bar_x, bar_y = 230, 165
     bar_width, bar_height = 500, 30
