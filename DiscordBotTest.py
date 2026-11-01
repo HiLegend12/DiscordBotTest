@@ -8,7 +8,10 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 import mysql.connector
-from mysql.connector.abstracts import MySQLConnectionAbstract, MySQLCursorAbstract
+from mysql.connector.abstracts import (
+    MySQLConnectionAbstract,
+    MySQLCursorAbstract
+)
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import unicodedata
@@ -25,13 +28,23 @@ DB_NAME: str = os.getenv("DB_NAME", "defaultdb")
 DB_PORT: int = int(os.getenv("DB_PORT", 3306))
 
 
-db = cast(MySQLConnectionAbstract, mysql.connector.connect(
-    host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, database=DB_NAME,
-))
+db = cast(
+    MySQLConnectionAbstract,
+    mysql.connector.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME,
+    ),
+)
 
+# Define globals
 ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
 MY_GUILD = discord.Object(id=1564821894081941534)
 FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "NotoSans-Regular.ttf")
+DAILY_COOLDOWN: int = 86400  # 24 hours: minimum time between claims
+STREAK_WINDOW: int = 172800
 
 # Discord bot setup
 intents = discord.Intents.default()
@@ -176,26 +189,48 @@ async def delay(ctx: commands.Context[commands.Bot]) -> None:
 
 
 @bot.hybrid_command(name="daily", description="Claim your daily XP reward.")
-@commands.cooldown(1, 86400, commands.BucketType.user)
 async def daily(ctx: commands.Context[commands.Bot]) -> None:
     user_id: int = ctx.author.id
-    daily_reward: int = random.randint(100, 175)
+    now: float = time.time()
 
     cursor = get_cursor()
     try:
         ensure_user_exists(cursor, user_id)
-        cursor.execute("SELECT xp, level FROM user_info WHERE user_id = %s", (user_id,))
-        xp, level = cast(tuple[int, int], cursor.fetchone())
+        cursor.execute(
+            "SELECT xp, level, last_daily, daily_streak FROM user_info WHERE user_id = %s",
+            (user_id,),
+        )
+        xp, level, last_daily, streak = cast(
+            tuple[int, int, float, int], cursor.fetchone()
+        )
 
-        is_first_claim = xp == 0 and level == 0
+        # Still on cooldown? Tell them how long is left and stop.
+        elapsed = now - last_daily
+        if elapsed < DAILY_COOLDOWN:
+            hours, remainder = divmod(DAILY_COOLDOWN - elapsed, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            await ctx.send(
+                f"Daily reward is on cooldown. Please try again in "
+                f"{int(hours)}h {int(minutes)}m {int(seconds)}s."
+            )
+            return
+
+        # Claimed within 48h of the last claim keeps the streak; otherwise restart at 1
+        is_first_claim = last_daily == 0
+        streak = streak + 1 if elapsed < STREAK_WINDOW else 1
+
+        streak_bonus = min(streak, 10) * 5
+        daily_reward = random.randint(100, 175) + streak_bonus
+
         new_xp = xp + daily_reward
         new_level, leveled_up = calculate_new_level(new_xp, level)
 
         cursor.execute(
-            "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
-            (new_xp, new_level, user_id),
+            "UPDATE user_info SET xp = %s, level = %s, last_daily = %s, daily_streak = %s "
+            "WHERE user_id = %s",
+            (new_xp, new_level, now, streak, user_id),
         )
-        db.commit()
+        get_db().commit()
 
         if leveled_up and isinstance(ctx.author, discord.Member):
             await grant_level_roles(ctx.author, new_level)
@@ -205,24 +240,12 @@ async def daily(ctx: commands.Context[commands.Bot]) -> None:
                 f"Welcome {ctx.author.mention}! You claimed your first daily reward of **{daily_reward} XP**!"
             )
         else:
-            await ctx.send(f"Daily reward claimed! You received **{daily_reward} XP**.")
+            await ctx.send(
+                f"Daily reward claimed! You received **{daily_reward} XP** "
+                f"(streak: **{streak}**, bonus: +{streak_bonus} XP)."
+            )
     finally:
         cursor.close()
-
-
-@daily.error
-async def daily_error(
-    ctx: commands.Context[commands.Bot], error: commands.CommandError
-) -> None:
-    if isinstance(error, commands.CommandOnCooldown):
-        remaining_time: float = error.retry_after
-        hours, remainder = divmod(remaining_time, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        await ctx.send(
-            f"Daily reward is on cooldown. Please try again in {int(hours)}h {int(minutes)}m {int(seconds)}s."
-        )
-    else:
-        await ctx.send("An error occurred while trying to claim your daily reward.")
 
 
 @bot.event
@@ -245,12 +268,15 @@ async def main():
 
     # Connect to the database
     print(f"Connecting to database {DB_HOST}:{DB_PORT}...")
-    db = mysql.connector.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
+    db = cast(
+        MySQLConnectionAbstract,
+        mysql.connector.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+        )
     )
     print("Database connected successfully!")
 
@@ -501,11 +527,17 @@ def generate_rank_card(
     return buffer
 
 
-def get_cursor():
-    """Ping the DB (reconnecting if needed) and return a fresh cursor."""
+def get_db() -> MySQLConnectionAbstract:
+    """Return the live DB connection, or fail loudly if it isn't connected yet."""
     assert db is not None, "Database not connected"
-    db.ping(reconnect=True, attempts=3, delay=1)
-    return db.cursor()
+    return db
+
+
+def get_cursor() -> MySQLCursorAbstract:
+    """Ping the DB (reconnecting if needed) and return a fresh cursor."""
+    conn = get_db()
+    conn.ping(reconnect=True, attempts=3, delay=1)
+    return conn.cursor()
 
 
 def add_xp(user_id: int) -> int | None:
