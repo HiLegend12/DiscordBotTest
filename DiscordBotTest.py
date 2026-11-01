@@ -16,6 +16,26 @@ import unicodedata
 load_dotenv()
 
 
+# --- ENVIRONMENT & DATABASE CONFIGURATION ---
+BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+DB_HOST: str = os.getenv("DB_HOST", "localhost")
+DB_USER: str = os.getenv("DB_USER", "root")
+DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+DB_NAME: str = os.getenv("DB_NAME", "defaultdb")
+DB_PORT: int = int(os.getenv("DB_PORT", 3306))
+
+
+db: mysql.connector.MySQLConnection | None = None
+
+ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
+MY_GUILD = discord.Object(id=1564821894081941534)
+FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "NotoSans-Regular.ttf")
+
+# Discord bot setup
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 # --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---
 async def handle_ping(request):
     if bot.is_ready():
@@ -36,26 +56,6 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Web server running on port {port}")
-
-
-# --- ENVIRONMENT & DATABASE CONFIGURATION ---
-BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
-DB_HOST: str = os.getenv("DB_HOST", "localhost")
-DB_USER: str = os.getenv("DB_USER", "root")
-DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
-DB_NAME: str = os.getenv("DB_NAME", "defaultdb")
-DB_PORT: int = int(os.getenv("DB_PORT", 3306))
-
-
-db: mysql.connector.MySQLConnection | None = None
-
-ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
-MY_GUILD = discord.Object(id=1564821894081941534)
-
-# Discord bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ----------- USER COMMANDS -----------
 @bot.event
@@ -390,8 +390,8 @@ def generate_rank_card(username: str, avatar_bytes: bytes, xp: int, level: int, 
 
     # Load fonts, with a fallback to default if the specified font is not found
     try:
-        font_large = ImageFont.truetype("seguisym.ttf", 40)
-        font_small = ImageFont.truetype("seguisym.ttf", 25)
+        font_large = ImageFont.truetype(FONT_TYPE, 40)
+        font_small = ImageFont.truetype(FONT_TYPE, 25)
     except OSError:
         # Fallback just in case the file gets moved
         font_large = ImageFont.load_default()
