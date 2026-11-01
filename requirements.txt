@@ -3,3 +3,4 @@ mysql-connector-python
 python-dotenv
 aiohttp
 Pillow==10.3.0
+numpy

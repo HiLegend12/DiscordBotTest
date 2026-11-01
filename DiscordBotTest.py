@@ -6,9 +6,9 @@ from typing import cast
 from aiohttp import web
 import discord
 from discord.ext import commands
-from discord import app_commands
 from dotenv import load_dotenv
 import mysql.connector
+from mysql.connector.abstracts import MySQLConnectionAbstract, MySQLCursorAbstract
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import unicodedata
@@ -25,7 +25,9 @@ DB_NAME: str = os.getenv("DB_NAME", "defaultdb")
 DB_PORT: int = int(os.getenv("DB_PORT", 3306))
 
 
-db: mysql.connector.MySQLConnection | None = None
+db = cast(MySQLConnectionAbstract, mysql.connector.connect(
+    host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, database=DB_NAME,
+))
 
 ROLE_REPWARDS: dict[int, int] = {1: 1565183458060537887}
 MY_GUILD = discord.Object(id=1564821894081941534)
@@ -36,8 +38,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+
 # --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---
-async def handle_ping(request):
+async def handle_ping(request: web.Request) -> web.Response:
     if bot.is_ready():
         return web.Response(text="Bot is alive and connected!")
     return web.Response(
@@ -45,7 +48,7 @@ async def handle_ping(request):
     )
 
 
-async def start_web_server():
+async def start_web_server() -> None:
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -56,6 +59,7 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Web server running on port {port}")
+
 
 # ----------- USER COMMANDS -----------
 @bot.event
@@ -79,21 +83,11 @@ async def on_message(message: discord.Message) -> None:
             await message.channel.send(
                 f"Congratulations {message.author.mention}, you've leveled up to level {new_level}!"
             )
-
-            # Check for role rewards
-            if new_level in ROLE_REPWARDS:
-                role_id: int = ROLE_REPWARDS[new_level]
-                role: discord.Role | None = message.guild.get_role(role_id)
-                if role and isinstance(message.author, discord.Member):
-                    try:
-                        await message.author.add_roles(role)
-                        await message.channel.send(
-                            f"{message.author.mention} has been awarded the role {role.name} for reaching level {new_level}!"
-                        )
-                    except discord.Forbidden:
-                        print(
-                            f"Can't assign {role.name}: move the bot's role above it."
-                        )
+            if isinstance(message.author, discord.Member):
+                for role in await grant_level_roles(message.author, new_level):
+                    await message.channel.send(
+                        f"{message.author.mention} has been awarded the role {role.name} for reaching level {new_level}!"
+                    )
 
     await bot.process_commands(message)
 
@@ -127,7 +121,9 @@ async def rank(
         xp, level = result
 
     # Find username colour, defaulting to white if no color is set
-    user_colour: tuple[int, int, int] = target.color.to_rgb() if target.color.value != 0 else (255, 255, 255)
+    user_colour: tuple[int, int, int] = (
+        target.color.to_rgb() if target.color.value != 0 else (255, 255, 255)
+    )
 
     # Fetch the avatar as raw bytes directly from Discord
     avatar_bytes = await target.display_avatar.with_size(256).with_format("png").read()
@@ -135,7 +131,8 @@ async def rank(
     # Generate the rank card image in a separate thread to avoid blocking the event loop
     print(f"Raw username: {ascii(target.display_name)}")
     image_buffer = await asyncio.to_thread(
-        generate_rank_card, target.display_name, avatar_bytes, xp, level, user_colour)
+        generate_rank_card, target.display_name, avatar_bytes, xp, level, user_colour
+    )
 
     # Convert the buffer into a Discord File object and send it
     file = discord.File(fp=image_buffer, filename="rank_card.png")
@@ -183,38 +180,40 @@ async def delay(ctx: commands.Context[commands.Bot]) -> None:
 async def daily(ctx: commands.Context[commands.Bot]) -> None:
     user_id: int = ctx.author.id
     daily_reward: int = random.randint(100, 175)
-    current_time: float = time.time()
 
     cursor = get_cursor()
     try:
+        ensure_user_exists(cursor, user_id)
         cursor.execute("SELECT xp, level FROM user_info WHERE user_id = %s", (user_id,))
-        result = cast(tuple[int, int] | None, cursor.fetchone())
+        xp, level = cast(tuple[int, int], cursor.fetchone())
 
-        if result is None:
-            cursor.execute(
-                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
-                (user_id, daily_reward, 1, current_time) 
-            )
-            db.commit()
-            await ctx.send(f"Welcome {ctx.author.mention}! You claimed your first daily reward of **{daily_reward} XP** and reached **Level 1**!")
-            return
-
-        xp, level = result
-        new_xp: int = xp + daily_reward
-        level, _ = calculate_new_level(new_xp, level)
+        is_first_claim = xp == 0 and level == 0
+        new_xp = xp + daily_reward
+        new_level, leveled_up = calculate_new_level(new_xp, level)
 
         cursor.execute(
-            "UPDATE user_info SET xp = %s, level = %s, last_message = %s WHERE user_id = %s",
-            (new_xp, level, current_time, user_id)
+            "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
+            (new_xp, new_level, user_id),
         )
         db.commit()
-        await ctx.send(f"Daily reward claimed! You received **{daily_reward} XP**.")
 
+        if leveled_up and isinstance(ctx.author, discord.Member):
+            await grant_level_roles(ctx.author, new_level)
+
+        if is_first_claim:
+            await ctx.send(
+                f"Welcome {ctx.author.mention}! You claimed your first daily reward of **{daily_reward} XP**!"
+            )
+        else:
+            await ctx.send(f"Daily reward claimed! You received **{daily_reward} XP**.")
     finally:
         cursor.close()
 
+
 @daily.error
-async def daily_error(ctx: commands.Context[commands.Bot], error: commands.CommandError) -> None:
+async def daily_error(
+    ctx: commands.Context[commands.Bot], error: commands.CommandError
+) -> None:
     if isinstance(error, commands.CommandOnCooldown):
         remaining_time: float = error.retry_after
         hours, remainder = divmod(remaining_time, 3600)
@@ -278,7 +277,9 @@ async def main():
 # ----------- ADMIN COMMANDS -----------
 @bot.hybrid_command(name="givexp", description="[ADMIN] Give XP to a user.")
 @commands.has_permissions(administrator=True)
-async def givexp(ctx: commands.Context[commands.Bot], member: discord.Member, xp_amount: int) -> None:
+async def givexp(
+    ctx: commands.Context[commands.Bot], member: discord.Member, xp_amount: int
+) -> None:
     """[ADMIN] Give XP to a user."""
     # Check if the XP amount is positive
     if xp_amount <= 0:
@@ -290,16 +291,21 @@ async def givexp(ctx: commands.Context[commands.Bot], member: discord.Member, xp
         current_time: float = time.time()
 
         # Check if the user exists in the database
-        cursor.execute("SELECT xp, level FROM user_info WHERE user_id = %s", (member.id,))
+        cursor.execute(
+            "SELECT xp, level FROM user_info WHERE user_id = %s", (member.id,)
+        )
         result = cast(tuple[int, int] | None, cursor.fetchone())
 
         # If the user doesn't exist, insert them into the database with the given XP
         if result is None:
+            ensure_user_exists(cursor, member.id)
+            new_xp: int = xp_amount
+            new_level, _ = calculate_new_level(new_xp, 0)
             cursor.execute(
-                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
-                (member.id, xp_amount, 0, current_time),
+                "UPDATE user_info SET xp = %s, level = %s, last_message = %s WHERE user_id = %s",
+                (new_xp, new_level, current_time, member.id),
             )
-        
+
         # If the user exists, update their XP and level
         else:
             xp, level = result
@@ -322,7 +328,9 @@ async def givexp(ctx: commands.Context[commands.Bot], member: discord.Member, xp
 
 @bot.hybrid_command(name="setlevel", description="[ADMIN] Set a user's level.")
 @commands.has_permissions(administrator=True)
-async def setlevel(ctx: commands.Context[commands.Bot], member: discord.Member, new_level: int) -> None:
+async def setlevel(
+    ctx: commands.Context[commands.Bot], member: discord.Member, new_level: int
+) -> None:
     """[ADMIN] Set a user's level."""
     # Check if the new level is negative
     if new_level < 0:
@@ -339,9 +347,10 @@ async def setlevel(ctx: commands.Context[commands.Bot], member: discord.Member, 
 
         # If the user doesn't exist, insert them into the database with the new level and corresponding XP
         if result is None:
+            ensure_user_exists(cursor, member.id)
             cursor.execute(
-                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
-                (member.id, base_xp, new_level, current_time),
+                "UPDATE user_info SET xp = %s, level = %s, last_message = %s WHERE user_id = %s",
+                (base_xp, new_level, current_time, member.id),
             )
         # If the user exists, update their level and XP
         else:
@@ -370,28 +379,66 @@ async def admin_command_error(
 
 
 # ----------- HELPER FUNCTIONS -----------
+async def grant_level_roles(member: discord.Member, level: int) -> list[discord.Role]:
+    """Give the member every reward role they've qualified for. Returns the roles newly granted."""
+    granted: list[discord.Role] = []
+
+    for required_level, role_id in ROLE_REPWARDS.items():
+        if level < required_level:
+            continue  # not high enough for this reward yet
+
+        role = member.guild.get_role(role_id)
+        if role is None or role in member.roles:
+            continue  # role was deleted, or they already have it
+
+        try:
+            await member.add_roles(role)
+            granted.append(role)
+        except discord.Forbidden:
+            print(f"Can't assign {role.name}: move the bot's role above it.")
+
+    return granted
+
+
+def ensure_user_exists(cursor: MySQLCursorAbstract, user_id: int) -> None:
+    """Create a row for this user if one doesn't exist yet. Does nothing otherwise."""
+    cursor.execute(
+        "INSERT IGNORE INTO user_info (user_id, xp, level, last_message) "
+        "VALUES (%s, 0, 0, 0)",
+        (user_id,),
+    )
+
 
 def calculate_new_level(xp: int, current_level: int) -> tuple[int, bool]:
     """Calculate if the current XP pushes the user to one or more new levels."""
     new_level: int = current_level
     leveled_up: bool = False
-    
+
     # Using a while loop catches massive XP bursts that span multiple levels
-    while xp >= 100 * (new_level ** 2):
+    while xp >= 100 * (new_level**2):
         new_level += 1
         leveled_up = True
-        
+
     return new_level, leveled_up
 
-def generate_rank_card(username: str, avatar_bytes: bytes, xp: int, level: int, user_colour: tuple[int, int, int]) -> BytesIO:
+
+def generate_rank_card(
+    username: str,
+    avatar_bytes: bytes,
+    xp: int,
+    level: int,
+    user_colour: tuple[int, int, int],
+) -> BytesIO:
     # Generate a rank card image for the user.
-    background = Image.new("RGB", (800, 250), color=(43, 45, 49)) # Standard Discord dark theme color
+    background = Image.new(
+        "RGB", (800, 250), color=(43, 45, 49)
+    )  # Standard Discord dark theme color
     draw = ImageDraw.Draw(background)
 
     # Load fonts, with a fallback to default if the specified font is not found
     try:
-        font_large = ImageFont.truetype(FONT_TYPE, 40)
-        font_small = ImageFont.truetype(FONT_TYPE, 25)
+        font_large = ImageFont.truetype(FONT_PATH, 40)
+        font_small = ImageFont.truetype(FONT_PATH, 25)
     except OSError:
         # Fallback just in case the file gets moved
         font_large = ImageFont.load_default()
@@ -403,7 +450,7 @@ def generate_rank_card(username: str, avatar_bytes: bytes, xp: int, level: int, 
 
     # Calculate XP and level details for the progress bar
     current_level_xp = 100 * ((level - 1) ** 2) if level > 0 else 0
-    needed_xp = 100 * (level ** 2)
+    needed_xp = 100 * (level**2)
 
     # Calculate how much XP the user has into the current level and the total XP needed for the next level
     xp_into_level = xp - current_level_xp
@@ -416,7 +463,7 @@ def generate_rank_card(username: str, avatar_bytes: bytes, xp: int, level: int, 
     # Draw the avatar
     avatar = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
     avatar = avatar.resize((150, 150))
-    
+
     # Create a circular mask for the avatar to make it round
     mask = Image.new("L", (150, 150), 0)
     draw_mask = ImageDraw.Draw(mask)
@@ -425,7 +472,9 @@ def generate_rank_card(username: str, avatar_bytes: bytes, xp: int, level: int, 
 
     # Draw the username and XP/level text
     draw.text((230, 50), clean_username, font=font_large, fill=(255, 255, 255))
-    xp_text = f"Level {level}  |  {xp:,} Total XP  |  {xp_into_level:,} / {xp_range:,} XP"
+    xp_text = (
+        f"Level {level}  |  {xp:,} Total XP  |  {xp_into_level:,} / {xp_range:,} XP"
+    )
     draw.text((230, 115), xp_text, font=font_small, fill=(185, 187, 190))
 
     # Draw the progress bar
@@ -433,22 +482,22 @@ def generate_rank_card(username: str, avatar_bytes: bytes, xp: int, level: int, 
     bar_width, bar_height = 500, 30
     fill_width = int(bar_width * percentage)
     draw.rounded_rectangle(
-        [bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], 
-        radius=15, 
-        fill=(30, 31, 34)
+        [bar_x, bar_y, bar_x + bar_width, bar_y + bar_height],
+        radius=15,
+        fill=(30, 31, 34),
     )
     if fill_width > 15:
         draw.rounded_rectangle(
-            [bar_x, bar_y, bar_x + fill_width, bar_y + bar_height], 
-            radius=15, 
-            fill=user_colour
+            [bar_x, bar_y, bar_x + fill_width, bar_y + bar_height],
+            radius=15,
+            fill=user_colour,
         )
 
     # Save the image to a BytesIO buffer and return it
     buffer = BytesIO()
     background.save(buffer, format="PNG")
     buffer.seek(0)
-    
+
     return buffer
 
 
@@ -472,11 +521,7 @@ def add_xp(user_id: int) -> int | None:
         result = cast(tuple[int, int, float] | None, cursor.fetchone())
 
         if result is None:
-            cursor.execute(
-                "INSERT INTO user_info (user_id, xp, level, last_message) VALUES (%s, %s, %s, %s)",
-                (user_id, 0, 0, current_time),
-            )
-            db.commit()
+            ensure_user_exists(cursor, user_id)
             xp, level, last_message = 0, 0, current_time
         else:
             xp, level, last_message = result
