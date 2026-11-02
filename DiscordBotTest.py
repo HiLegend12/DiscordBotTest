@@ -12,7 +12,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-EXTENSIONS: tuple[str, ...] = ("cogs.general", "cogs.admin", "cogs.xp")
+EXTENSIONS: tuple[str, ...] = ("cogs.general", "cogs.admin", "cogs.xp", "cogs.mining")
 
 
 # --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---
@@ -56,7 +56,7 @@ async def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing!")
 
-    # Load each Cog file. 
+    # Load each Cog file.
     for extension in EXTENSIONS:
         await bot.load_extension(extension)
         print(f"Loaded {extension}")

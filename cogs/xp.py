@@ -16,6 +16,7 @@ class XP(commands.Cog):
     """XP gain, ranks, the leaderboard and daily rewards."""
 
     def __init__(self, bot: commands.Bot) -> None:
+        """Initialize the XP cog with the bot instance."""
         self.bot = bot
 
     @commands.Cog.listener()
@@ -100,7 +101,7 @@ class XP(commands.Cog):
             xp,
             level,
             user_colour,
-            streak
+            streak,
         )
 
         # Send the generated rank card image as a file attachment

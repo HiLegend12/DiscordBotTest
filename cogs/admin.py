@@ -12,6 +12,7 @@ class Admin(commands.Cog):
     """Admin-only commands."""
 
     def __init__(self, bot: commands.Bot) -> None:
+        """Initialize the Admin cog with the bot instance."""
         self.bot = bot
 
     @commands.hybrid_command(name="givexp", description="[ADMIN] Give XP to a user.")
@@ -48,7 +49,7 @@ class Admin(commands.Cog):
                 (new_xp, new_level, member.id),
             )
             get_db().commit()
-            
+
             # Grant any new level roles if the user leveled up
             await grant_level_roles(member, new_level)
             await ctx.send(
@@ -71,7 +72,7 @@ class Admin(commands.Cog):
         if new_level < 0:
             await ctx.send("Level cannot be negative.")
             return
-        
+
         cursor = get_cursor()
         try:
             # Calculate the base XP for the new level. The formula is 100 * (level^2).
@@ -84,7 +85,7 @@ class Admin(commands.Cog):
                 (base_xp, new_level, member.id),
             )
             get_db().commit()
-            
+
             # Grant any new level roles if the user leveled up
             await grant_level_roles(member, new_level)
             await ctx.send(
