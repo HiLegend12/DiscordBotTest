@@ -212,4 +212,3 @@ class XP(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     """Setup function to add the XP cog to the bot."""
     await bot.add_cog(XP(bot))
-````
