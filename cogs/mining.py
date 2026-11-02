@@ -4,8 +4,6 @@ import time
 from typing import cast
 
 import discord
-
-import discord
 from discord.ext import commands
 
 from config import MINE_COOLDOWN, ORES, PICKAXES
