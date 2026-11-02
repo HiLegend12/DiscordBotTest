@@ -10,25 +10,20 @@ from config import MINE_COOLDOWN, ORES, PICKAXES
 from database import ensure_user_exists, get_cursor, get_db
 
 
-
 class Mining(commands.Cog):
     """Mining game: dig for ore, sell it for coins."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.emojis: dict[str, str] = {}
-        self.emojis: dict[str, str] = {}
 
     @commands.hybrid_command(name="mine", description="Mine for ore.")
     async def mine(self, ctx: commands.Context[commands.Bot]) -> None:
         user_id = ctx.author.id
         now = time.time()
-        user_id = ctx.author.id
-        now = time.time()
 
         cursor = get_cursor()
         try:
-            # Make sure the user exists in the database
             # Make sure the user exists in the database
             ensure_user_exists(cursor, user_id)
             cursor.execute(
@@ -39,12 +34,7 @@ class Mining(commands.Cog):
 
             # Cooldown check
             remaining = MINE_COOLDOWN - (now - last_mine)
-            # Cooldown check
-            remaining = MINE_COOLDOWN - (now - last_mine)
             if remaining > 0:
-                await ctx.send(
-                    f"Your pickaxe needs a rest! Try again in {remaining:.1f}s."
-                )
                 await ctx.send(
                     f"Your pickaxe needs a rest! Try again in {remaining:.1f}s."
                 )
@@ -66,10 +56,8 @@ class Mining(commands.Cog):
             amount: int = random.randint(1, 3)
 
             # Save the cooldown timestamp
-            # Save the cooldown timestamp
             cursor.execute(
                 "UPDATE user_info SET last_mine = %s WHERE user_id = %s",
-                (now, user_id),
                 (now, user_id),
             )
 
@@ -102,14 +90,7 @@ class Mining(commands.Cog):
         fetched = await self.bot.fetch_application_emojis()
         self.emojis = {emoji.name: str(emoji) for emoji in fetched}
 
-    @commands.Cog.listener()
-    async def on_ready(self) -> None:
-        """Fetch the bot's application emojis once it's logged in."""
-        fetched = await self.bot.fetch_application_emojis()
-        self.emojis = {emoji.name: str(emoji) for emoji in fetched}
-
 
 async def setup(bot: commands.Bot) -> None:
-    """Setup function to add the Mining cog to the bot."""
     """Setup function to add the Mining cog to the bot."""
     await bot.add_cog(Mining(bot))
