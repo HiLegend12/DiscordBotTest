@@ -12,7 +12,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-EXTENSIONS: tuple[str, ...] = ("cogs.general", "cogs.admin", "cogs.xp", "cogs.mining")
+EXTENSIONS: tuple[str, ...] = ("cogs.general", "cogs.admin", "cogs.xp", "cogs.mining", "cogs.shop")
 
 
 # --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---

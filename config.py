@@ -1,6 +1,14 @@
 import os
 import discord
 from dotenv import load_dotenv
+from typing import TypedDict
+
+class Pickaxe(TypedDict):
+    name: str
+    tier: int
+    price: int
+    center: float
+    spread: float
 
 load_dotenv()
 
@@ -25,11 +33,42 @@ STREAK_WINDOW: int = 172800
 
 
 MINE_COOLDOWN = 3
-ORES: dict[str, tuple[int, int]] = {
-    "dirt": (50, 1),
-    "stone": (25, 2),
-    "coal": (12, 5),
-    "iron": (8, 15),
-    "gold": (4, 50),
-    "diamond": (1, 200),
+ORES: dict[str, tuple[int, int, float]] = {
+    "dirt": (1, 0, 0),
+    "stone": (2, 1, 0.5),
+    "coal": (5, 1, 1),
+    "iron": (15, 2, 2),
+    "gold": (50, 3, 3.5),
+    "diamond": (200, 3, 5),
+}
+PICKAXES: dict[str, Pickaxe] = {
+    "hand": {"name": "Bare Hands", "tier": 0, "price": 0, "center": 0.0, "spread": 1.0},
+    "wooden": {
+        "name": "Wooden Pickaxe",
+        "tier": 1,
+        "price": 50,
+        "center": 0.7,
+        "spread": 0.8,
+    },
+    "stone": {
+        "name": "Stone Pickaxe",
+        "tier": 2,
+        "price": 250,
+        "center": 1.3,
+        "spread": 0.8,
+    },
+    "iron": {
+        "name": "Iron Pickaxe",
+        "tier": 3,
+        "price": 1000,
+        "center": 2.3,
+        "spread": 1.0,
+    },
+    "diamond": {
+        "name": "Diamond Pickaxe",
+        "tier": 4,
+        "price": 5000,
+        "center": 3.5,
+        "spread": 1.2,
+    }
 }
