@@ -12,6 +12,7 @@ def generate_rank_card(
     xp: int,
     level: int,
     user_colour: tuple[int, int, int],
+    streak: int,
 ) -> BytesIO:
     # Generate a rank card image for the user.
     background = Image.new(
@@ -55,8 +56,11 @@ def generate_rank_card(
     draw_mask.ellipse((0, 0, 150, 150), fill=255)
     background.paste(avatar, (40, 50), mask)
 
-    # Draw the username and XP/level text
+    # Draw the username, streak and XP/level text
     draw.text((230, 50), clean_username, font=font_large, fill=(255, 255, 255))
+    draw.text(
+        (230, 205), f"Daily streak: {streak}", font=font_small, fill=(185, 187, 190)
+    )
     xp_text = (
         f"Level {level}  |  {xp:,} Total XP  |  {xp_into_level:,} / {xp_range:,} XP"
     )

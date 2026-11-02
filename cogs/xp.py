@@ -60,24 +60,28 @@ class XP(commands.Cog):
         """Display the rank (level and XP) of a user."""
         # If no member is specified, default to the command invoker
         target: discord.Member | discord.User = member or ctx.author
-        
+
         await ctx.defer()
 
         # Fetch the user's XP and level from the database
         cursor = get_cursor()
         try:
             cursor.execute(
-                "SELECT xp, level FROM user_info WHERE user_id = %s", (target.id,)
+                "SELECT xp, level, last_daily, daily_streak FROM user_info WHERE user_id = %s",
+                (target.id,),
             )
-            result = cast(tuple[int, int] | None, cursor.fetchone())
+            result = cast(tuple[int, int, float, int] | None, cursor.fetchone())
         finally:
             cursor.close()
 
-        # If the user has no data, default to 0 XP and level 0
+        # If the user has no data, default everything to 0
         if result is None:
-            xp, level = 0, 0
+            xp, level, streak = 0, 0, 0
         else:
-            xp, level = result
+            xp, level, last_daily, streak = result
+            # Reset
+            if time.time() - last_daily >= STREAK_WINDOW:
+                streak = 0
 
         # Find username colour, defaulting to white if no colour is set
         user_colour: tuple[int, int, int] = (
@@ -96,8 +100,9 @@ class XP(commands.Cog):
             xp,
             level,
             user_colour,
+            streak
         )
-        
+
         # Send the generated rank card image as a file attachment
         file = discord.File(fp=image_buffer, filename="rank_card.png")
         await ctx.send(file=file)
@@ -118,7 +123,7 @@ class XP(commands.Cog):
             results = cast(list[tuple[int, int, int]] | None, cursor.fetchall())
         finally:
             cursor.close()
-        
+
         # If there are no results, inform the user that the leaderboard is empty
         if not results:
             await ctx.send("No data recorded yet.")
@@ -180,8 +185,7 @@ class XP(commands.Cog):
 
             # Update the database with the new values
             cursor.execute(
-                "UPDATE user_info SET xp = %s, level = %s, last_daily = %s, daily_streak = %s "
-                "WHERE user_id = %s",
+                "UPDATE user_info SET xp = %s, level = %s, last_daily = %s, daily_streak = %s WHERE user_id = %s",
                 (new_xp, new_level, now, streak, user_id),
             )
             get_db().commit()
@@ -189,7 +193,7 @@ class XP(commands.Cog):
             # If the user leveled up, grant them any new roles they earned
             if leveled_up and isinstance(ctx.author, discord.Member):
                 await grant_level_roles(ctx.author, new_level)
-                
+
             # Send a message to the user about their daily reward, streak, and any level up
             if is_first_claim:
                 await ctx.send(
@@ -208,3 +212,4 @@ class XP(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     """Setup function to add the XP cog to the bot."""
     await bot.add_cog(XP(bot))
+````
