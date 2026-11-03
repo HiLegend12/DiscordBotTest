@@ -6,8 +6,9 @@ from typing import cast
 import discord
 from discord.ext import commands
 
-from config import MINE_COOLDOWN, ORES, PICKAXES
+from config import MINE_COOLDOWN, MINING_XP_BASE, ORE_XP, ORES, PICKAXES
 from database import ensure_user_exists, get_cursor, get_db
+from levels import calculate_new_level
 
 
 class Mining(commands.Cog):
@@ -28,10 +29,13 @@ class Mining(commands.Cog):
             # Make sure the user exists in the database
             ensure_user_exists(cursor, user_id)
             cursor.execute(
-                "SELECT last_mine, pickaxe FROM user_info WHERE user_id = %s",
+                "SELECT last_mine, pickaxe, mining_xp, mining_level "
+                "FROM user_info WHERE user_id = %s",
                 (user_id,),
             )
-            last_mine, pickaxe_key = cast(tuple[float, str], cursor.fetchone())
+            last_mine, pickaxe_key, mining_xp, mining_level = cast(
+                tuple[float, str, int, int], cursor.fetchone()
+            )
 
             # Cooldown check
             remaining = MINE_COOLDOWN - (now - last_mine)
@@ -56,12 +60,21 @@ class Mining(commands.Cog):
             ore: str = random.choices(names, weights=weights, k=1)[0]
             amount: int = random.randint(1, 3)
 
+            # Mining XP is separate from chat XP and has its own level
+            xp_gained: int = ORE_XP[ore] * amount
+            new_mining_xp: int = mining_xp + xp_gained
+            new_mining_level, leveled_up = calculate_new_level(
+                new_mining_xp, mining_level, MINING_XP_BASE
+            )
+
             conn.start_transaction()
             try:
-                # Save the cooldown timestamp
+                # One UPDATE saves the cooldown timestamp and the mining progress
                 cursor.execute(
-                    "UPDATE user_info SET last_mine = %s WHERE user_id = %s",
-                    (now, user_id),
+                    "UPDATE user_info "
+                    "SET last_mine = %s, mining_xp = %s, mining_level = %s "
+                    "WHERE user_id = %s",
+                    (now, new_mining_xp, new_mining_level, user_id),
                 )
 
                 # Add the ore to the inventory
@@ -72,7 +85,7 @@ class Mining(commands.Cog):
                     (user_id, ore, amount),
                 )
 
-                # One commit: both writes save together or not at all
+                # One commit: all writes save together or not at all
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -83,9 +96,15 @@ class Mining(commands.Cog):
                 title=ctx.author.display_name,
                 color=discord.Color.dark_gold(),
             )
-            embed.description = (
+            description = (
                 f"**You mined:**\n{amount} {self.emojis.get(ore, '')} {ore.title()}"
+                f"\n\n+{xp_gained} Mining XP"
             )
+            if leveled_up:
+                description += (
+                    f"\n**Mining level up! You're now Mining Level {new_mining_level}.**"
+                )
+            embed.description = description
             await ctx.send(embed=embed)
         finally:
             cursor.close()

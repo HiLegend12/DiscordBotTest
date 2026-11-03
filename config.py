@@ -31,8 +31,16 @@ FONT_PATH = os.path.join(os.path.dirname(__file__), "NotoSans-Regular.ttf")
 DAILY_COOLDOWN: int = 86400
 STREAK_WINDOW: int = 172800
 
-
+MINING_XP_BASE: int = 50
 MINE_COOLDOWN = 3
+ORE_XP: dict[str, int] = {
+    "dirt": 1,
+    "stone": 2,
+    "coal": 4,
+    "iron": 8,
+    "gold": 15,
+    "diamond": 40,
+}
 ORES: dict[str, tuple[int, int, float]] = {
     "dirt": (1, 0, 0),
     "stone": (2, 1, 0.5),

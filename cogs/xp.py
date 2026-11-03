@@ -61,19 +61,18 @@ class XP(commands.Cog):
         cursor = get_cursor()
         try:
             cursor.execute(
-                "SELECT xp, level, last_daily, daily_streak FROM user_info WHERE user_id = %s",
+                "SELECT xp, level, last_daily, daily_streak, mining_xp, mining_level "
+                "FROM user_info WHERE user_id = %s",
                 (target.id,),
             )
-            result = cast(tuple[int, int, float, int] | None, cursor.fetchone())
+            result = cast(tuple[int, int, float, int, int, int] | None, cursor.fetchone())
         finally:
             cursor.close()
 
-        # If the user has no data, default everything to 0
         if result is None:
-            xp, level, streak = 0, 0, 0
+            xp, level, streak, mining_xp, mining_level = 0, 0, 0, 0, 0
         else:
-            xp, level, last_daily, streak = result
-            # Reset
+            xp, level, last_daily, streak, mining_xp, mining_level = result
             if time.time() - last_daily >= STREAK_WINDOW:
                 streak = 0
 
@@ -95,6 +94,8 @@ class XP(commands.Cog):
             level,
             user_colour,
             streak,
+            mining_xp,
+            mining_level,
         )
 
         # Send the generated rank card image as a file attachment

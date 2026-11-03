@@ -8,14 +8,14 @@ from config import ROLE_REWARDS
 from database import ensure_user_exists, get_cursor
 
 
-def calculate_new_level(xp: int, current_level: int) -> tuple[int, bool]:
+def calculate_new_level(
+    xp: int, current_level: int, base: int = 100
+) -> tuple[int, bool]:
     """Calculate if the current XP pushes the user to one or more new levels."""
-    # Initialize the new level to the current level and a flag to track if the user leveled up
     new_level: int = current_level
     leveled_up: bool = False
 
-    # Keep increasing the level as long as the XP meets the requirement for the next level
-    while xp >= 100 * (new_level**2):
+    while xp >= base * (new_level**2):
         new_level += 1
         leveled_up = True
 
