@@ -7,8 +7,8 @@ import discord
 from discord.ext import commands
 
 from config import DAILY_COOLDOWN, DEBUG, STREAK_WINDOW
-from database import ensure_user_exists, get_cursor, get_db
-from levels import add_xp, calculate_new_level, grant_level_roles
+from database import ensure_user_exists, get_cursor
+from levels import add_xp, announce_level_up, calculate_new_level
 from rankcard import generate_rank_card
 
 
@@ -40,19 +40,12 @@ class XP(commands.Cog):
             return
 
         # If the user leveled up, announce it and grant any new roles
-        await message.channel.send(
-            f"Congratulations {message.author.mention}, you've leveled up to level {new_level}!"
-        )
-        # If the user is a member of the guild, grant them any new roles they earned
-        if isinstance(message.author, discord.Member):
-            for role in await grant_level_roles(message.author, new_level):
-                await message.channel.send(
-                    f"{message.author.mention} has been awarded the role {role.name} for reaching level {new_level}!"
-                )
+        await announce_level_up(message.channel, message.author, new_level)
 
     @commands.hybrid_command(
         name="rank", description="Display the rank (level and XP) of a user."
     )
+    @commands.guild_only()
     async def rank(
         self,
         ctx: commands.Context[commands.Bot],
@@ -189,11 +182,6 @@ class XP(commands.Cog):
                 "UPDATE user_info SET xp = %s, level = %s, last_daily = %s, daily_streak = %s WHERE user_id = %s",
                 (new_xp, new_level, now, streak, user_id),
             )
-            get_db().commit()
-
-            # If the user leveled up, grant them any new roles they earned
-            if leveled_up and isinstance(ctx.author, discord.Member):
-                await grant_level_roles(ctx.author, new_level)
 
             # Send a message to the user about their daily reward, streak, and any level up
             if is_first_claim:
@@ -206,6 +194,10 @@ class XP(commands.Cog):
                     f"Daily reward claimed! You received **{daily_reward} XP** "
                     f"(streak: **{streak}**, bonus: +{streak_bonus} XP)."
                 )
+
+            # If the user leveled up, grant them any new roles they earned
+            if leveled_up:
+                await announce_level_up(ctx, ctx.author, new_level)
         finally:
             cursor.close()
 

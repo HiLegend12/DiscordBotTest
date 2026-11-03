@@ -22,6 +22,7 @@ class Mining(commands.Cog):
         user_id = ctx.author.id
         now = time.time()
 
+        conn = get_db()
         cursor = get_cursor()
         try:
             # Make sure the user exists in the database
@@ -55,22 +56,27 @@ class Mining(commands.Cog):
             ore: str = random.choices(names, weights=weights, k=1)[0]
             amount: int = random.randint(1, 3)
 
-            # Save the cooldown timestamp
-            cursor.execute(
-                "UPDATE user_info SET last_mine = %s WHERE user_id = %s",
-                (now, user_id),
-            )
+            conn.start_transaction()
+            try:
+                # Save the cooldown timestamp
+                cursor.execute(
+                    "UPDATE user_info SET last_mine = %s WHERE user_id = %s",
+                    (now, user_id),
+                )
 
-            # Add the ore to the inventory
-            cursor.execute(
-                "INSERT INTO inventory (user_id, item, quantity) "
-                "VALUES (%s, %s, %s) "
-                "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)",
-                (user_id, ore, amount),
-            )
+                # Add the ore to the inventory
+                cursor.execute(
+                    "INSERT INTO inventory (user_id, item, quantity) "
+                    "VALUES (%s, %s, %s) "
+                    "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)",
+                    (user_id, ore, amount),
+                )
 
-            # One commit: both writes save together or not at all
-            get_db().commit()
+                # One commit: both writes save together or not at all
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
             # Build the embed
             embed = discord.Embed(
@@ -87,6 +93,8 @@ class Mining(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         """Fetch the bot's application emojis once it's logged in."""
+        if self.emojis:
+            return
         fetched = await self.bot.fetch_application_emojis()
         self.emojis = {emoji.name: str(emoji) for emoji in fetched}
 

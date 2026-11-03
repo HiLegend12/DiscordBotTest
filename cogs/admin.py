@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from database import ensure_user_exists, get_cursor, get_db
+from database import ensure_user_exists, get_cursor
 from levels import calculate_new_level, grant_level_roles
 
 
@@ -48,7 +48,6 @@ class Admin(commands.Cog):
                 "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
                 (new_xp, new_level, member.id),
             )
-            get_db().commit()
 
             # Grant any new level roles if the user leveled up
             await grant_level_roles(member, new_level)
@@ -84,7 +83,6 @@ class Admin(commands.Cog):
                 "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
                 (base_xp, new_level, member.id),
             )
-            get_db().commit()
 
             # Grant any new level roles if the user leveled up
             await grant_level_roles(member, new_level)
@@ -102,6 +100,7 @@ class Admin(commands.Cog):
             await ctx.send("You do not have permission to use this command.")
         else:
             print(f"Unhandled error in {ctx.command}: {error!r}")
+            await ctx.send("Something went wrong running that command.")
 
 
 async def setup(bot: commands.Bot) -> None:

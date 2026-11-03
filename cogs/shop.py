@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands
 
 from config import PICKAXES
-from database import ensure_user_exists, get_cursor, get_db
+from database import ensure_user_exists, get_cursor
 
 
 class Shop(commands.Cog):
@@ -92,7 +92,6 @@ class Shop(commands.Cog):
             if cursor.rowcount == 0:
                 await ctx.send("Purchase failed: not enough coins.")
                 return
-            get_db().commit()
 
             await ctx.send(f"You bought the **{item['name']}**!")
         finally:

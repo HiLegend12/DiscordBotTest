@@ -12,7 +12,13 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-EXTENSIONS: tuple[str, ...] = ("cogs.general", "cogs.admin", "cogs.xp", "cogs.mining", "cogs.shop")
+EXTENSIONS: tuple[str, ...] = (
+    "cogs.general",
+    "cogs.admin",
+    "cogs.xp",
+    "cogs.mining",
+    "cogs.shop",
+)
 
 
 # --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---
@@ -37,9 +43,7 @@ async def start_web_server() -> None:
     print(f"Web server running on port {port}")
 
 
-@bot.event
-async def on_ready() -> None:
-    print("Logged in as", bot.user)
+async def setup_hook() -> None:
     try:
         # Sync to a specific server instantly
         bot.tree.copy_global_to(guild=MY_GUILD)
@@ -49,10 +53,15 @@ async def on_ready() -> None:
         print(f"Failed to sync commands: {e}")
 
 
-async def main() -> None:
-    # Start the web server in the background
-    asyncio.create_task(start_web_server())
+bot.setup_hook = setup_hook
 
+
+@bot.event
+async def on_ready() -> None:
+    print("Logged in as", bot.user)
+
+
+async def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing!")
 

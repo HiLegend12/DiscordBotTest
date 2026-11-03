@@ -16,6 +16,7 @@ db = cast(
         database=DB_NAME,
     ),
 )
+db.autocommit = True
 
 
 def get_db() -> MySQLConnectionAbstract:

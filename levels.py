@@ -5,7 +5,7 @@ from typing import cast
 import discord
 
 from config import ROLE_REWARDS
-from database import ensure_user_exists, get_cursor, get_db
+from database import ensure_user_exists, get_cursor
 
 
 def calculate_new_level(xp: int, current_level: int) -> tuple[int, bool]:
@@ -47,6 +47,23 @@ async def grant_level_roles(member: discord.Member, level: int) -> list[discord.
     return granted
 
 
+async def announce_level_up(
+    destination: discord.abc.Messageable,
+    member: discord.User | discord.Member,
+    new_level: int,
+) -> None:
+    """Announce a level up and any reward roles."""
+    await destination.send(
+        f"Congratulations {member.mention}, you've leveled up to level {new_level}!"
+    )
+    # If the user is a member of the guild, grant them any new roles they earned
+    if isinstance(member, discord.Member):
+        for role in await grant_level_roles(member, new_level):
+            await destination.send(
+                f"{member.mention} has been awarded the role {role.name} for reaching level {new_level}!"
+            )
+
+
 def add_xp(user_id: int) -> int | None:
     """Add XP to a user and check for level up."""
     cursor = get_cursor()
@@ -75,7 +92,6 @@ def add_xp(user_id: int) -> int | None:
             "WHERE user_id = %s",
             (new_xp, new_level, current_time, user_id),
         )
-        get_db().commit()
 
         return new_level if leveled_up else None
     finally:
