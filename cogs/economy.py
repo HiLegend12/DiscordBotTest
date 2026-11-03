@@ -135,6 +135,31 @@ class Economy(commands.Cog):
         fetched = await self.bot.fetch_application_emojis()
         self.emojis = {emoji.name: str(emoji) for emoji in fetched}
 
+    @commands.hybrid_command(
+        name="balance",
+        description="Check your coin balance.",
+        aliases=["bal"],
+    )
+    async def balance(
+        self,
+        ctx: commands.Context[commands.Bot],
+        member: discord.Member | None = None,
+    ) -> None:
+        """Show how many coins you (or another member) have."""
+        target = member or ctx.author
+
+        cursor = get_cursor()
+        try:
+            cursor.execute(
+                "SELECT coins FROM user_info WHERE user_id = %s", (target.id,)
+            )
+            result = cast(tuple[int] | None, cursor.fetchone())
+        finally:
+            cursor.close()
+
+        coins = result[0] if result else 0
+        await ctx.send(f"**{target.display_name}** has **{coins:,}** coins.")
+
 
 async def setup(bot: commands.Bot) -> None:
     """Setup function to add the Economy cog to the bot."""
