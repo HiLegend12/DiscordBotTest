@@ -15,7 +15,6 @@ class Economy(commands.Cog):
         self.bot = bot
         self.emojis: dict[str, str] = {}
 
-
     @commands.hybrid_command(name="inventory", description="View your ore and coins.")
     async def inventory(self, ctx: commands.Context[commands.Bot]) -> None:
         """Display the user's inventory of ores and their coin balance."""
@@ -35,7 +34,7 @@ class Economy(commands.Cog):
             (coins,) = cast(tuple[int], cursor.fetchone())
         finally:
             cursor.close()
-        
+
         # Build the inventory display based on the fetched data
         if rows:
             body = "\n".join(
@@ -63,6 +62,7 @@ class Economy(commands.Cog):
         user_id = ctx.author.id
         key = item.lower()
 
+        conn = get_db()
         cursor = get_cursor()
         try:
             # Ensure the user exists in the database and fetch their inventory
@@ -87,28 +87,37 @@ class Economy(commands.Cog):
             # Calculate the total earnings and update the database
             total = 0
             lines: list[str] = []
-            for name, qty in to_sell:
-                # Only removes the ore if you still have that much
-                cursor.execute(
-                    "UPDATE inventory SET quantity = quantity - %s "
-                    "WHERE user_id = %s AND item = %s AND quantity >= %s",
-                    (qty, user_id, name, qty),
-                )
-                if cursor.rowcount == 0:
-                    continue
-                earned = qty * ORES[name][0]
-                total += earned
-                lines.append(
-                    f"{qty:,} {self.emojis.get(name, '')} {name.title()}: {earned:,}"
-                )
+            conn.start_transaction()
+            try:
+                for name, qty in to_sell:
+                    # Only removes the ore if you still have that much
+                    cursor.execute(
+                        "UPDATE inventory SET quantity = quantity - %s "
+                        "WHERE user_id = %s AND item = %s AND quantity >= %s",
+                        (qty, user_id, name, qty),
+                    )
+                    if cursor.rowcount == 0:
+                        continue
+                    earned = qty * ORES[name][0]
+                    total += earned
+                    lines.append(
+                        f"{qty:,} {self.emojis.get(name, '')} {name.title()}: {earned:,}"
+                    )
 
-            cursor.execute(
-                "UPDATE user_info SET coins = coins + %s WHERE user_id = %s",
-                (total, user_id),
-            )
-            get_db().commit()
+                cursor.execute(
+                    "UPDATE user_info SET coins = coins + %s WHERE user_id = %s",
+                    (total, user_id),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
         finally:
             cursor.close()
+
+        if not lines:
+            await ctx.send("You have nothing to sell.")
+            return
 
         # Create and send the embed message with the sale details
         embed = discord.Embed(
@@ -117,6 +126,14 @@ class Economy(commands.Cog):
             color=discord.Color.green(),
         )
         await ctx.send(embed=embed)
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """Fetch the bot's application emojis once it's logged in."""
+        if self.emojis:
+            return
+        fetched = await self.bot.fetch_application_emojis()
+        self.emojis = {emoji.name: str(emoji) for emoji in fetched}
 
 
 async def setup(bot: commands.Bot) -> None:
