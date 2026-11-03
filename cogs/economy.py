@@ -3,7 +3,7 @@ from typing import cast
 import discord
 from discord.ext import commands
 
-from config import ORES
+from config import ORES, PICKAXES, MINING_XP_BASE
 from database import ensure_user_exists, get_cursor, get_db
 
 
@@ -15,42 +15,55 @@ class Economy(commands.Cog):
         self.bot = bot
         self.emojis: dict[str, str] = {}
 
-    @commands.hybrid_command(name="inventory", description="View your ore and coins.")
+    @commands.hybrid_command(name="inventory", description="View your inventory.", aliases=["inv"])
     async def inventory(self, ctx: commands.Context[commands.Bot]) -> None:
-        """Display the user's inventory of ores and their coin balance."""
-        # Validate the user and fetch their inventory and coin balance
+        """Display the user's stats, equipped pickaxe, and ores."""
         user_id = ctx.author.id
         cursor = get_cursor()
         try:
-            # Ensure the user exists in the database and fetch their inventory and coin balance
             ensure_user_exists(cursor, user_id)
             cursor.execute(
+                "SELECT coins, pickaxe, mining_xp, mining_level "
+                "FROM user_info WHERE user_id = %s",
+                (user_id,),
+            )
+            coins, pickaxe_key, mining_xp, mining_level = cast(
+                tuple[int, str, int, int], cursor.fetchone()
+            )
+            cursor.execute(
                 "SELECT item, quantity FROM inventory "
-                "WHERE user_id = %s AND quantity > 0 ORDER BY item",
+                "WHERE user_id = %s AND quantity > 0",
                 (user_id,),
             )
             rows = cast(list[tuple[str, int]], cursor.fetchall())
-            cursor.execute("SELECT coins FROM user_info WHERE user_id = %s", (user_id,))
-            (coins,) = cast(tuple[int], cursor.fetchone())
         finally:
             cursor.close()
 
-        # Build the inventory display based on the fetched data
-        if rows:
-            body = "\n".join(
-                f"{qty:,} {self.emojis.get(item, '')} {item.title()}"
-                for item, qty in rows
-            )
-        else:
-            body = "Nothing yet. Try `/mine`!"
+        owned: dict[str, int] = dict(rows)
+        pickaxe_name: str = PICKAXES.get(pickaxe_key, PICKAXES["hand"])["name"]
+        pickaxe_emoji: str = self.emojis.get(f"{pickaxe_key}_pic", "")
+        xp_needed: int = MINING_XP_BASE * (mining_level**2)
 
-        # Create and send the embed message with the inventory details
+        # One line per ore, in the order defined in config (dirt -> diamond)
+        ore_lines: list[str] = []
+        total_value: int = 0
+        for name, data in ORES.items():
+            qty = owned.get(name, 0)
+            total_value += qty * data[0]
+            ore_lines.append(f"{qty:,} {self.emojis.get(name, '')} {name.title()}")
+
+        description = (
+            f"Balance: **${coins:,}**\n"
+            f"**Level {mining_level}**, {mining_xp:,} / {xp_needed:,} XP to next level\n"
+            f"Currently using: {pickaxe_emoji} **{pickaxe_name}**\n\n"
+            f"**Ores**\n" + "\n".join(ore_lines) + f"\nOre value: **${total_value:,}**"
+        )
+
         embed = discord.Embed(
-            title=f"{ctx.author.display_name}'s Inventory",
-            description=body,
+            title=f"Inventory of {ctx.author.display_name}",
+            description=description,
             color=discord.Color.dark_gold(),
         )
-        embed.set_footer(text=f"Coins: {coins:,}")
         await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="sell", description="Sell ore for coins.")
@@ -134,31 +147,6 @@ class Economy(commands.Cog):
             return
         fetched = await self.bot.fetch_application_emojis()
         self.emojis = {emoji.name: str(emoji) for emoji in fetched}
-
-    @commands.hybrid_command(
-        name="balance",
-        description="Check your coin balance.",
-        aliases=["bal"],
-    )
-    async def balance(
-        self,
-        ctx: commands.Context[commands.Bot],
-        member: discord.Member | None = None,
-    ) -> None:
-        """Show how many coins you (or another member) have."""
-        target = member or ctx.author
-
-        cursor = get_cursor()
-        try:
-            cursor.execute(
-                "SELECT coins FROM user_info WHERE user_id = %s", (target.id,)
-            )
-            result = cast(tuple[int] | None, cursor.fetchone())
-        finally:
-            cursor.close()
-
-        coins = result[0] if result else 0
-        await ctx.send(f"**{target.display_name}** has **{coins:,}** coins.")
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -37,6 +37,7 @@ ORE_XP: dict[str, int] = {
     "dirt": 1,
     "stone": 2,
     "coal": 4,
+    "copper": 6,
     "iron": 8,
     "gold": 15,
     "diamond": 40,
@@ -45,9 +46,10 @@ ORES: dict[str, tuple[int, int, float]] = {
     "dirt": (1, 0, 0),
     "stone": (2, 1, 0.5),
     "coal": (5, 1, 1),
+    "copper": (8, 1, 1.5),
     "iron": (15, 2, 2),
-    "gold": (50, 3, 3.5),
-    "diamond": (200, 3, 5),
+    "gold": (50, 4, 3.5),
+    "diamond": (200, 4, 5),
 }
 PICKAXES: dict[str, Pickaxe] = {
     "hand": {"name": "Bare Hands", "tier": 0, "price": 0, "center": 0.0, "spread": 1.0},
@@ -65,18 +67,25 @@ PICKAXES: dict[str, Pickaxe] = {
         "center": 1.3,
         "spread": 0.8,
     },
+    "copper": {
+        "name": "Copper Pickaxe",
+        "tier": 3,
+        "price": 500,
+        "center": 1.8,
+        "spread": 0.9,
+    },
     "iron": {
         "name": "Iron Pickaxe",
-        "tier": 3,
+        "tier": 4,
         "price": 1000,
         "center": 2.3,
         "spread": 1.0,
     },
     "diamond": {
         "name": "Diamond Pickaxe",
-        "tier": 4,
+        "tier": 5,
         "price": 5000,
         "center": 3.5,
         "spread": 1.2,
-    }
+    },
 }
