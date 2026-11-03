@@ -149,6 +149,7 @@ class Economy(commands.Cog):
         self.emojis = {emoji.name: str(emoji) for emoji in fetched}
 
 
+
 async def setup(bot: commands.Bot) -> None:
     """Setup function to add the Economy cog to the bot."""
     await bot.add_cog(Economy(bot))
