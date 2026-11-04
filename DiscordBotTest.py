@@ -65,6 +65,8 @@ async def on_ready() -> None:
 async def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing!")
+    
+    await start_web_server()
 
     # Load each Cog file.
     for extension in EXTENSIONS:

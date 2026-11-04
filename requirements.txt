@@ -1,5 +1,7 @@
 discord.py
 mysql-connector-python
+aiomysql
+cryptography
 python-dotenv
 aiohttp
 Pillow==10.3.0
