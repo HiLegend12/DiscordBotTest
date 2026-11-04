@@ -89,3 +89,17 @@ PICKAXES: dict[str, Pickaxe] = {
         "spread": 1.2,
     },
 }
+
+SMELTING: dict[str, tuple[str, int, int, int]] = {
+    "copper": ("copper_bar", 3, 1, 40),
+    "iron": ("iron_bar", 3, 1, 70),
+    "gold": ("gold_bar", 3, 1, 200),
+}
+SELL_PRICES: dict[str, int] = {
+    **{name: data[0] for name, data in ORES.items()},
+    **{bar: price for bar, _, _, price in SMELTING.values()},
+}
+
+SMELT_SECONDS_PER_BAR: int = 30
+FORGE_COUNT_COSTS: list[int] = [500, 2000, 8000]
+FORGE_SIZE_COSTS: list[int] = [300, 1000, 4000]

@@ -1,23 +1,123 @@
-from typing import cast
+import asyncio
+import time
+from collections.abc import Coroutine
+from typing import Any, cast
 
 import discord
 from discord.ext import commands
 
-from config import ORES, PICKAXES, MINING_XP_BASE
+from config import (
+    FORGE_COUNT_COSTS,
+    FORGE_SIZE_COSTS,
+    MINING_XP_BASE,
+    ORES,
+    PICKAXES,
+    SELL_PRICES,
+    SMELT_SECONDS_PER_BAR,
+    SMELTING,
+)
 from database import ensure_user_exists, get_cursor, get_db
 
 
 class Economy(commands.Cog):
-    """Inventory and selling."""
+    """Inventory, selling, smelting and forges."""
 
     def __init__(self, bot: commands.Bot) -> None:
         """Initialize the Economy cog with the bot instance."""
         self.bot = bot
         self.emojis: dict[str, str] = {}
+        self._tasks: set[asyncio.Task[None]] = set()
 
-    @commands.hybrid_command(name="inventory", description="View your inventory.", aliases=["inv"])
+    def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run a coroutine in the background and keep a reference to it."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _edit_when_ready(
+        self, message: discord.Message, finish_time: float, new_content: str
+    ) -> None:
+        """Wait until the job finishes, then replace the message text."""
+        await asyncio.sleep(max(0, finish_time - time.time()))
+        try:
+            await message.edit(content=new_content)
+        except discord.HTTPException:
+            pass
+
+    def _build_forge_embed(
+        self, user_id: int, display_name: str
+    ) -> tuple[discord.Embed, list[float]]:
+        """Build the forge overview. Also returns finish times of jobs still running."""
+        cursor = get_cursor()
+        try:
+            ensure_user_exists(cursor, user_id)
+            cursor.execute(
+                "SELECT forge_count, forge_size FROM user_info WHERE user_id = %s",
+                (user_id,),
+            )
+            count, size = cast(tuple[int, int], cursor.fetchone())
+            cursor.execute(
+                "SELECT slot, bar, amount, finish_time FROM smelting "
+                "WHERE user_id = %s ORDER BY slot",
+                (user_id,),
+            )
+            jobs = cast(list[tuple[int, str, int, float]], cursor.fetchall())
+        finally:
+            cursor.close()
+
+        max_size = len(FORGE_SIZE_COSTS) + 1
+        count_cost = (
+            f"${FORGE_COUNT_COSTS[count]:,}"
+            if count < len(FORGE_COUNT_COSTS)
+            else "MAX"
+        )
+        size_cost = f"${FORGE_SIZE_COSTS[size - 1]:,}" if size < max_size else "MAX"
+
+        now = time.time()
+        job_lines: list[str] = []
+        pending: list[float] = []
+        for slot, bar, amount, finish in jobs:
+            name = bar.replace("_", " ").title()
+            if finish <= now:
+                status = "**Ready!** Use `/collect`"
+            else:
+                status = f"ready <t:{int(finish)}:R>"
+                pending.append(finish)
+            job_lines.append(f"Forge {slot}: {amount:,} {name} ({status})")
+
+        description = (
+            f"Forges: **{count}** / {len(FORGE_COUNT_COSTS)}  (next: {count_cost})\n"
+            f"Size: **{size}** / {max_size}  (next: {size_cost})\n\n"
+            + ("\n".join(job_lines) if job_lines else "No active jobs.")
+            + "\n\nUse `/upgrade number` or `/upgrade size`."
+        )
+        embed = discord.Embed(
+            title=f"{display_name}'s Forges",
+            description=description,
+            color=discord.Color.orange(),
+        )
+        return embed, pending
+
+    async def _refresh_forge(
+        self,
+        message: discord.Message,
+        finish_time: float,
+        user_id: int,
+        display_name: str,
+    ) -> None:
+        """Wait for one job to finish, then rebuild the embed from the database."""
+        await asyncio.sleep(max(0, finish_time - time.time()) + 1)
+        embed, _ = self._build_forge_embed(user_id, display_name)
+        try:
+            await message.edit(embed=embed)
+        except discord.HTTPException:
+            pass
+
+    @commands.hybrid_command(
+        name="inventory", description="View your inventory.", aliases=["inv"]
+    )
     async def inventory(self, ctx: commands.Context[commands.Bot]) -> None:
-        """Display the user's stats, equipped pickaxe, and ores."""
+        """Display the user's stats, equipped pickaxe, ores and bars."""
         user_id = ctx.author.id
         cursor = get_cursor()
         try:
@@ -40,11 +140,11 @@ class Economy(commands.Cog):
             cursor.close()
 
         owned: dict[str, int] = dict(rows)
+
         pickaxe_name: str = PICKAXES.get(pickaxe_key, PICKAXES["hand"])["name"]
         pickaxe_emoji: str = self.emojis.get(f"{pickaxe_key}_pic", "")
         xp_needed: int = MINING_XP_BASE * (mining_level**2)
 
-        # One line per ore, in the order defined in config (dirt -> diamond)
         ore_lines: list[str] = []
         total_value: int = 0
         for name, data in ORES.items():
@@ -52,11 +152,23 @@ class Economy(commands.Cog):
             total_value += qty * data[0]
             ore_lines.append(f"{qty:,} {self.emojis.get(name, '')} {name.title()}")
 
+        bar_lines: list[str] = []
+        for bar, _, _, price in SMELTING.values():
+            qty = owned.get(bar, 0)
+            total_value += qty * price
+            bar_lines.append(
+                f"{qty:,} {self.emojis.get(bar, '')} {bar.replace('_', ' ').title()}"
+            )
+
         description = (
             f"Balance: **${coins:,}**\n"
             f"**Level {mining_level}**, {mining_xp:,} / {xp_needed:,} XP to next level\n"
             f"Currently using: {pickaxe_emoji} **{pickaxe_name}**\n\n"
-            f"**Ores**\n" + "\n".join(ore_lines) + f"\nOre value: **${total_value:,}**"
+            f"**Ores**\n"
+            + "\n".join(ore_lines)
+            + "\n\n**Bars**\n"
+            + "\n".join(bar_lines)
+            + f"\n\nTotal value: **${total_value:,}**"
         )
 
         embed = discord.Embed(
@@ -66,19 +178,17 @@ class Economy(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="sell", description="Sell ore for coins.")
+    @commands.hybrid_command(name="sell", description="Sell ore and bars for coins.")
     async def sell(
         self, ctx: commands.Context[commands.Bot], item: str = "all"
     ) -> None:
-        """Sell ore for coins. If "all" is specified, sell all ores in the inventory."""
-        # Validate the item key and fetch the corresponding ore
+        """Sell ore or bars for coins. If "all" is specified, sell everything sellable."""
         user_id = ctx.author.id
         key = item.lower()
 
         conn = get_db()
         cursor = get_cursor()
         try:
-            # Ensure the user exists in the database and fetch their inventory
             ensure_user_exists(cursor, user_id)
             cursor.execute(
                 "SELECT item, quantity FROM inventory "
@@ -87,23 +197,20 @@ class Economy(commands.Cog):
             )
             rows = cast(list[tuple[str, int]], cursor.fetchall())
 
-            # Filter the inventory to only include ores that match the specified item or all ores if "all" is specified
             to_sell = [
                 (name, qty)
                 for name, qty in rows
-                if name in ORES and (key == "all" or name == key)
+                if name in SELL_PRICES and (key == "all" or name == key)
             ]
             if not to_sell:
                 await ctx.send("You have nothing to sell.")
                 return
 
-            # Calculate the total earnings and update the database
             total = 0
             lines: list[str] = []
             conn.start_transaction()
             try:
                 for name, qty in to_sell:
-                    # Only removes the ore if you still have that much
                     cursor.execute(
                         "UPDATE inventory SET quantity = quantity - %s "
                         "WHERE user_id = %s AND item = %s AND quantity >= %s",
@@ -111,10 +218,11 @@ class Economy(commands.Cog):
                     )
                     if cursor.rowcount == 0:
                         continue
-                    earned = qty * ORES[name][0]
+                    earned = qty * SELL_PRICES[name]
                     total += earned
                     lines.append(
-                        f"{qty:,} {self.emojis.get(name, '')} {name.title()}: {earned:,}"
+                        f"{qty:,} {self.emojis.get(name, '')} "
+                        f"{name.replace('_', ' ').title()}: {earned:,}"
                     )
 
                 cursor.execute(
@@ -132,13 +240,251 @@ class Economy(commands.Cog):
             await ctx.send("You have nothing to sell.")
             return
 
-        # Create and send the embed message with the sale details
         embed = discord.Embed(
             title=f"{ctx.author.display_name} sold:",
             description="\n".join(lines) + f"\n\n**+{total:,} coins**",
             color=discord.Color.green(),
         )
         await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="smelt", description="Smelt ore into bars.")
+    async def smelt(
+        self, ctx: commands.Context[commands.Bot], ore: str, amount: int = 1
+    ) -> None:
+        """Start a smelting job in a free forge."""
+        key = ore.lower()
+        recipe = SMELTING.get(key)
+        if recipe is None:
+            options = ", ".join(f"`{k}`" for k in SMELTING)
+            await ctx.send(f"You can't smelt that. Smeltable ores: {options}.")
+            return
+        if amount <= 0:
+            await ctx.send("Amount must be at least 1.")
+            return
+
+        bar, ore_each, coal_each, _ = recipe
+        ore_needed = ore_each * amount
+        coal_needed = coal_each * amount
+
+        user_id = ctx.author.id
+        conn = get_db()
+        cursor = get_cursor()
+        try:
+            ensure_user_exists(cursor, user_id)
+            cursor.execute(
+                "SELECT forge_count, forge_size FROM user_info WHERE user_id = %s",
+                (user_id,),
+            )
+            forge_count, forge_size = cast(tuple[int, int], cursor.fetchone())
+
+            if forge_count == 0:
+                await ctx.send(
+                    "You don't have a forge yet. Use `/forge` to see how to get one."
+                )
+                return
+            if amount > forge_size:
+                await ctx.send(
+                    f"Your forges can only smelt {forge_size} bar(s) at a time."
+                )
+                return
+
+            cursor.execute(
+                "SELECT slot, finish_time FROM smelting WHERE user_id = %s",
+                (user_id,),
+            )
+            busy = dict(cast(list[tuple[int, float]], cursor.fetchall()))
+            free_slot = next(
+                (s for s in range(1, forge_count + 1) if s not in busy), None
+            )
+            if free_slot is None:
+                soonest = min(busy.values())
+                if soonest <= time.time():
+                    await ctx.send(
+                        "Your forges are full, but one has finished! Use `/collect`."
+                    )
+                else:
+                    await ctx.send(
+                        f"All your forges are busy! One finishes "
+                        f"<t:{int(soonest)}:R>. Use `/collect` when it's done."
+                    )
+                return
+
+            finish_time = time.time() + SMELT_SECONDS_PER_BAR * amount
+
+            conn.start_transaction()
+            try:
+                cursor.execute(
+                    "UPDATE inventory SET quantity = quantity - %s "
+                    "WHERE user_id = %s AND item = %s AND quantity >= %s",
+                    (ore_needed, user_id, key, ore_needed),
+                )
+                ok = cursor.rowcount == 1
+
+                if ok:
+                    cursor.execute(
+                        "UPDATE inventory SET quantity = quantity - %s "
+                        "WHERE user_id = %s AND item = %s AND quantity >= %s",
+                        (coal_needed, user_id, "coal", coal_needed),
+                    )
+                    ok = cursor.rowcount == 1
+
+                if not ok:
+                    conn.rollback()
+                    await ctx.send(
+                        f"You need {ore_needed:,} {key} and {coal_needed:,} coal "
+                        f"to smelt {amount:,} bar(s)."
+                    )
+                    return
+
+                cursor.execute(
+                    "INSERT INTO smelting (user_id, slot, bar, amount, finish_time) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (user_id, free_slot, bar, amount, finish_time),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        finally:
+            cursor.close()
+
+        name = bar.replace("_", " ").title()
+        msg = await ctx.send(
+            f"Forge {free_slot} is smelting {ore_needed:,} {key} and "
+            f"{coal_needed:,} coal into {amount:,} {name}. "
+            f"Ready <t:{int(finish_time)}:R>."
+        )
+        # Spawn a background task to edit the message when the job is finished
+        self._spawn(
+            self._edit_when_ready(
+                msg,
+                finish_time,
+                f"Forge {free_slot} finished {amount:,} {name}! Use `/collect`.",
+            )
+        )
+
+    @commands.hybrid_command(name="collect", description="Collect finished bars.")
+    async def collect(self, ctx: commands.Context[commands.Bot]) -> None:
+        """Pick up the bars from every finished forge."""
+        # Get the user's ID and the current time
+        user_id = ctx.author.id
+        now = time.time()
+
+        # Fetch all finished smelting jobs for the user and add the bars to their inventory
+        conn = get_db()
+        cursor = get_cursor()
+        try:
+            # Fetch all finished smelting jobs for the user
+            cursor.execute(
+                "SELECT slot, bar, amount FROM smelting "
+                "WHERE user_id = %s AND finish_time <= %s",
+                (user_id, now),
+            )
+            # Fetch all finished smelting jobs for the user
+            done = cast(list[tuple[int, str, int]], cursor.fetchall())
+            if not done:
+                await ctx.send("Nothing is ready to collect.")
+                return
+
+            # Build a dictionary of collected bars and their quantities
+            collected: dict[str, int] = {}
+            conn.start_transaction()
+            try:
+                # For each finished smelting job, delete it from the smelting table and add the bars to the user's inventory
+                for slot, bar, amount in done:
+                    cursor.execute(
+                        "DELETE FROM smelting WHERE user_id = %s AND slot = %s",
+                        (user_id, slot),
+                    )
+                    if cursor.rowcount == 0:
+                        continue
+                    cursor.execute(
+                        "INSERT INTO inventory (user_id, item, quantity) "
+                        "VALUES (%s, %s, %s) "
+                        "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)",
+                        (user_id, bar, amount),
+                    )
+                    collected[bar] = collected.get(bar, 0) + amount
+                conn.commit()
+            except Exception:
+                # If any error occurs during the transaction, roll back all changes to maintain database integrity
+                conn.rollback()
+                raise
+        finally:
+            cursor.close()
+
+        # If nothing was collected, inform the user
+        if not collected:
+            await ctx.send("Nothing is ready to collect.")
+            return
+        lines = [
+            f"{qty:,} {self.emojis.get(bar, '')} {bar.replace('_', ' ').title()}"
+            for bar, qty in collected.items()
+        ]
+        await ctx.send("You collected:\n" + "\n".join(lines))
+
+    @commands.hybrid_command(name="forge", description="View your forges.")
+    async def forge(self, ctx: commands.Context[commands.Bot]) -> None:
+        """Show forge count, size, active jobs and upgrade costs."""
+        # Build the embed and send it to the channel
+        embed, pending = self._build_forge_embed(ctx.author.id, ctx.author.display_name)
+        msg = await ctx.send(embed=embed)
+
+        # If any jobs are still running, spawn a task to refresh the embed when they finish
+        for finish in pending:
+            self._spawn(
+                self._refresh_forge(msg, finish, ctx.author.id, ctx.author.display_name)
+            )
+
+    @commands.hybrid_command(name="upgrade", description="Upgrade your forges.")
+    async def upgrade(self, ctx: commands.Context[commands.Bot], kind: str) -> None:
+        """Buy another forge ('number') or bigger forges ('size')."""
+        # Normalize the kind to lowercase and validate it
+        kind = kind.lower()
+        if kind not in ("number", "size"):
+            await ctx.send("Choose `number` or `size`.")
+            return
+
+        column = "forge_count" if kind == "number" else "forge_size"
+
+        # Get the user's ID and prepare to query the database
+        user_id = ctx.author.id
+        cursor = get_cursor()
+        try:
+            # Ensure the user exists in the database and fetch their coins and current forge count/size
+            ensure_user_exists(cursor, user_id)
+            cursor.execute(
+                f"SELECT coins, {column} FROM user_info WHERE user_id = %s",
+                (user_id,),
+            )
+            coins, current = cast(tuple[int, int], cursor.fetchone())
+
+            # Determine the cost of the next upgrade based on the current level and the type of upgrade
+            costs = FORGE_COUNT_COSTS if kind == "number" else FORGE_SIZE_COSTS
+            index = current if kind == "number" else current - 1
+            if index >= len(costs):
+                await ctx.send("That's already at the maximum level.")
+                return
+
+            # Determine the cost of the next upgrade and check if the user has enough coins
+            cost = costs[index]
+            if coins < cost:
+                await ctx.send(f"You need ${cost:,} but only have ${coins:,}.")
+                return
+
+            # Update the database to deduct coins and increase the forge count or size
+            cursor.execute(
+                f"UPDATE user_info SET coins = coins - %s, {column} = {column} + 1 "
+                f"WHERE user_id = %s AND coins >= %s AND {column} = %s",
+                (cost, user_id, cost, current),
+            )
+            if cursor.rowcount == 0:
+                await ctx.send("Upgrade failed, try again.")
+                return
+        finally:
+            cursor.close()
+
+        await ctx.send(f"Upgraded forge {kind} to **{current + 1}** for ${cost:,}!")
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -147,7 +493,6 @@ class Economy(commands.Cog):
             return
         fetched = await self.bot.fetch_application_emojis()
         self.emojis = {emoji.name: str(emoji) for emoji in fetched}
-
 
 
 async def setup(bot: commands.Bot) -> None:
