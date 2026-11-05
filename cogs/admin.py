@@ -4,7 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from database import ensure_user_exists, get_cursor
+from database import ensure_user_exists, get_pool
 from levels import calculate_new_level, grant_level_roles
 
 
@@ -25,37 +25,30 @@ class Admin(commands.Cog):
         xp_amount: int,
     ) -> None:
         """[ADMIN] Give XP to a user."""
-        # Validate the XP amount
         if xp_amount <= 0:
             await ctx.send("Please provide a positive amount of XP to give.")
             return
 
-        cursor = get_cursor()
-        try:
-            # Ensure the user exists in the database
-            ensure_user_exists(cursor, member.id)
-            cursor.execute(
-                "SELECT xp, level FROM user_info WHERE user_id = %s", (member.id,)
-            )
-            xp, level = cast(tuple[int, int], cursor.fetchone())
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, member.id)
+                await cursor.execute(
+                    "SELECT xp, level FROM user_info WHERE user_id = %s", (member.id,)
+                )
+                xp, level = cast(tuple[int, int], await cursor.fetchone())
 
-            # Calculate the new XP and level
-            new_xp = xp + xp_amount
-            new_level, _ = calculate_new_level(new_xp, level)
+                new_xp = xp + xp_amount
+                new_level, _ = calculate_new_level(new_xp, level)
 
-            # Update the database with the new XP and level
-            cursor.execute(
-                "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
-                (new_xp, new_level, member.id),
-            )
+                await cursor.execute(
+                    "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
+                    (new_xp, new_level, member.id),
+                )
 
-            # Grant any new level roles if the user leveled up
-            await grant_level_roles(member, new_level)
-            await ctx.send(
-                f"Successfully gave **{xp_amount} XP** to {member.mention}. They are now **Level {new_level}** with **{new_xp} XP**."
-            )
-        finally:
-            cursor.close()
+        await grant_level_roles(member, new_level)
+        await ctx.send(
+            f"Successfully gave **{xp_amount} XP** to {member.mention}. They are now **Level {new_level}** with **{new_xp} XP**."
+        )
 
     @commands.hybrid_command(name="setlevel", description="[ADMIN] Set a user's level.")
     @app_commands.default_permissions(administrator=True)
@@ -67,30 +60,25 @@ class Admin(commands.Cog):
         new_level: int,
     ) -> None:
         """[ADMIN] Set a user's level."""
-        # Validate the new level
         if new_level < 0:
             await ctx.send("Level cannot be negative.")
             return
 
-        cursor = get_cursor()
-        try:
-            # Calculate the base XP for the new level. The formula is 100 * (level^2).
-            base_xp: int = 100 * ((new_level - 1) ** 2) if new_level > 0 else 0
+        # Base XP for the new level. The formula is 100 * ((level - 1)^2).
+        base_xp: int = 100 * ((new_level - 1) ** 2) if new_level > 0 else 0
 
-            # Ensure the user exists in the database
-            ensure_user_exists(cursor, member.id)
-            cursor.execute(
-                "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
-                (base_xp, new_level, member.id),
-            )
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, member.id)
+                await cursor.execute(
+                    "UPDATE user_info SET xp = %s, level = %s WHERE user_id = %s",
+                    (base_xp, new_level, member.id),
+                )
 
-            # Grant any new level roles if the user leveled up
-            await grant_level_roles(member, new_level)
-            await ctx.send(
-                f"Successfully set {member.mention} to **Level {new_level}** ({base_xp} XP)."
-            )
-        finally:
-            cursor.close()
+        await grant_level_roles(member, new_level)
+        await ctx.send(
+            f"Successfully set {member.mention} to **Level {new_level}** ({base_xp} XP)."
+        )
 
     async def cog_command_error(
         self, ctx: commands.Context[Any], error: Exception
@@ -106,3 +94,4 @@ class Admin(commands.Cog):
 async def setup(bot: commands.Bot) -> None:
     """Setup function to add the Admin cog to the bot."""
     await bot.add_cog(Admin(bot))
+    

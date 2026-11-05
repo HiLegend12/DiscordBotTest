@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands
 
 from config import MINE_COOLDOWN, MINING_XP_BASE, ORE_XP, ORES, PICKAXES
-from database import ensure_user_exists, get_cursor, get_db
+from database import ensure_user_exists, get_pool
 from levels import calculate_new_level
 
 
@@ -23,91 +23,85 @@ class Mining(commands.Cog):
         user_id = ctx.author.id
         now = time.time()
 
-        conn = get_db()
-        cursor = get_cursor()
-        try:
-            # Make sure the user exists in the database
-            ensure_user_exists(cursor, user_id)
-            cursor.execute(
-                "SELECT last_mine, pickaxe, mining_xp, mining_level "
-                "FROM user_info WHERE user_id = %s",
-                (user_id,),
-            )
-            last_mine, pickaxe_key, mining_xp, mining_level = cast(
-                tuple[float, str, int, int], cursor.fetchone()
-            )
-
-            # Cooldown check
-            remaining = MINE_COOLDOWN - (now - last_mine)
-            if remaining > 0:
-                await ctx.send(
-                    f"Your pickaxe needs a rest! Try again in {remaining:.1f}s."
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, user_id)
+                await cursor.execute(
+                    "SELECT last_mine, pickaxe, mining_xp, mining_level "
+                    "FROM user_info WHERE user_id = %s",
+                    (user_id,),
                 )
-                return
-
-            # Determine which ores can be mined based on the user's pickaxe tier
-            pickaxe = PICKAXES.get(pickaxe_key, PICKAXES["hand"])
-            names = [name for name, data in ORES.items() if data[1] <= pickaxe["tier"]]
-            weights = [
-                math.exp(
-                    -((ORES[name][2] - pickaxe["center"]) ** 2)
-                    / (2 * pickaxe["spread"] ** 2)
-                )
-                for name in names
-            ]
-
-            # Randomly select one ore based on the bell-curve weights
-            ore: str = random.choices(names, weights=weights, k=1)[0]
-            amount: int = random.randint(1, 3)
-
-            # Mining XP is separate from chat XP and has its own level
-            xp_gained: int = ORE_XP[ore] * amount
-            new_mining_xp: int = mining_xp + xp_gained
-            new_mining_level, leveled_up = calculate_new_level(
-                new_mining_xp, mining_level, MINING_XP_BASE
-            )
-
-            conn.start_transaction()
-            try:
-                # One UPDATE saves the cooldown timestamp and the mining progress
-                cursor.execute(
-                    "UPDATE user_info "
-                    "SET last_mine = %s, mining_xp = %s, mining_level = %s "
-                    "WHERE user_id = %s",
-                    (now, new_mining_xp, new_mining_level, user_id),
+                last_mine, pickaxe_key, mining_xp, mining_level = cast(
+                    tuple[float, str, int, int], await cursor.fetchone()
                 )
 
-                # Add the ore to the inventory
-                cursor.execute(
-                    "INSERT INTO inventory (user_id, item, quantity) "
-                    "VALUES (%s, %s, %s) "
-                    "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)",
-                    (user_id, ore, amount),
+                # Cooldown check
+                remaining = MINE_COOLDOWN - (now - last_mine)
+                if remaining > 0:
+                    await ctx.send(
+                        f"Your pickaxe needs a rest! Try again in {remaining:.1f}s."
+                    )
+                    return
+
+                # Ores allowed by pickaxe tier, weighted by a bell curve
+                pickaxe = PICKAXES.get(pickaxe_key, PICKAXES["hand"])
+                names = [
+                    name for name, data in ORES.items() if data[1] <= pickaxe["tier"]
+                ]
+                weights = [
+                    math.exp(
+                        -((ORES[name][2] - pickaxe["center"]) ** 2)
+                        / (2 * pickaxe["spread"] ** 2)
+                    )
+                    for name in names
+                ]
+
+                ore: str = random.choices(names, weights=weights, k=1)[0]
+                amount: int = random.randint(1, 3)
+
+                # Mining XP is separate from chat XP and has its own level
+                xp_gained: int = ORE_XP[ore] * amount
+                new_mining_xp: int = mining_xp + xp_gained
+                new_mining_level, leveled_up = calculate_new_level(
+                    new_mining_xp, mining_level, MINING_XP_BASE
                 )
 
-                # One commit: all writes save together or not at all
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+                # This connection belongs only to this command, so no other
+                # command can interleave statements into the transaction.
+                await conn.begin()
+                try:
+                    await cursor.execute(
+                        "UPDATE user_info "
+                        "SET last_mine = %s, mining_xp = %s, mining_level = %s "
+                        "WHERE user_id = %s",
+                        (now, new_mining_xp, new_mining_level, user_id),
+                    )
+                    await cursor.execute(
+                        "INSERT INTO inventory (user_id, item, quantity) "
+                        "VALUES (%s, %s, %s) "
+                        "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)",
+                        (user_id, ore, amount),
+                    )
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
 
-            # Build the embed
-            embed = discord.Embed(
-                title=ctx.author.display_name,
-                color=discord.Color.dark_gold(),
+        # Build the embed outside the DB block
+        embed = discord.Embed(
+            title=ctx.author.display_name,
+            color=discord.Color.dark_gold(),
+        )
+        description = (
+            f"**You mined:**\n{amount} {self.emojis.get(ore, '')} {ore.title()}"
+            f"\n\n+{xp_gained} Mining XP"
+        )
+        if leveled_up:
+            description += (
+                f"\n**Mining level up! You're now Mining Level {new_mining_level}.**"
             )
-            description = (
-                f"**You mined:**\n{amount} {self.emojis.get(ore, '')} {ore.title()}"
-                f"\n\n+{xp_gained} Mining XP"
-            )
-            if leveled_up:
-                description += (
-                    f"\n**Mining level up! You're now Mining Level {new_mining_level}.**"
-                )
-            embed.description = description
-            await ctx.send(embed=embed)
-        finally:
-            cursor.close()
+        embed.description = description
+        await ctx.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:

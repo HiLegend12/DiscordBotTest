@@ -6,6 +6,7 @@ from aiohttp import web
 from discord.ext import commands
 
 from config import BOT_TOKEN, MY_GUILD
+from database import close_pool, init_pool
 
 # Discord bot setup
 intents = discord.Intents.default()
@@ -65,29 +66,34 @@ async def on_ready() -> None:
 async def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN is missing!")
-    
+
+    # The pool must exist before any cog runs a query
+    await init_pool()
     await start_web_server()
 
-    # Load each Cog file.
-    for extension in EXTENSIONS:
-        await bot.load_extension(extension)
-        print(f"Loaded {extension}")
+    try:
+        # Load each Cog file.
+        for extension in EXTENSIONS:
+            await bot.load_extension(extension)
+            print(f"Loaded {extension}")
 
-    # Start the Discord bot
-    retry_delay = 600  # start with 10 minutes
-    while True:
-        try:
-            await bot.start(BOT_TOKEN)
-            break
-        except discord.HTTPException as e:
-            if e.status == 429:
-                print(f"Rate limited by Cloudflare. Retrying in {retry_delay}s...")
-                await bot.close()  # closes the leftover aiohttp connector
-                await asyncio.sleep(retry_delay)
-                bot.clear()  # lets the bot log in again
-                retry_delay = min(retry_delay * 2, 3600)
-            else:
-                raise
+        # Start the Discord bot
+        retry_delay = 600  # start with 10 minutes
+        while True:
+            try:
+                await bot.start(BOT_TOKEN)
+                break
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    print(f"Rate limited by Cloudflare. Retrying in {retry_delay}s...")
+                    await bot.close()  # closes the leftover aiohttp connector
+                    await asyncio.sleep(retry_delay)
+                    bot.clear()  # lets the bot log in again
+                    retry_delay = min(retry_delay * 2, 3600)
+                else:
+                    raise
+    finally:
+        await close_pool()
 
 
 if __name__ == "__main__":

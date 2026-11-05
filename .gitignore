@@ -3,5 +3,7 @@ __pycache__/
 *.pyc
 .env
 
+test.py
+
 # VS Code settings
 .vscode/

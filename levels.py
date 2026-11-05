@@ -5,7 +5,7 @@ from typing import cast
 import discord
 
 from config import ROLE_REWARDS
-from database import ensure_user_exists, get_cursor
+from database import ensure_user_exists, get_pool
 
 
 def calculate_new_level(
@@ -24,10 +24,8 @@ def calculate_new_level(
 
 async def grant_level_roles(member: discord.Member, level: int) -> list[discord.Role]:
     """Give the member every reward role they've qualified for. Returns the roles newly granted."""
-    # Initialize a list to keep track of newly granted roles
     granted: list[discord.Role] = []
 
-    # Loop through the ROLE_REWARDS dictionary to check which roles the user qualifies for based on their level
     for required_level, role_id in ROLE_REWARDS.items():
         if level < required_level:
             continue  # not high enough for this reward yet
@@ -37,11 +35,9 @@ async def grant_level_roles(member: discord.Member, level: int) -> list[discord.
             continue  # role was deleted, or they already have it
 
         try:
-            # Assign the role to the member and add it to the granted list
             await member.add_roles(role)
             granted.append(role)
         except discord.Forbidden:
-            # The bot doesn't have permission to assign this role
             print(f"Can't assign {role.name}: move the bot's role above it.")
 
     return granted
@@ -56,7 +52,6 @@ async def announce_level_up(
     await destination.send(
         f"Congratulations {member.mention}, you've leveled up to level {new_level}!"
     )
-    # If the user is a member of the guild, grant them any new roles they earned
     if isinstance(member, discord.Member):
         for role in await grant_level_roles(member, new_level):
             await destination.send(
@@ -64,35 +59,30 @@ async def announce_level_up(
             )
 
 
-def add_xp(user_id: int) -> int | None:
+async def add_xp(user_id: int) -> int | None:
     """Add XP to a user and check for level up."""
-    cursor = get_cursor()
-    try:
-        # Ensure the user exists in the database and fetch their current XP, level, and last message timestamp
-        ensure_user_exists(cursor, user_id)
-        cursor.execute(
-            "SELECT xp, level, last_message FROM user_info WHERE user_id = %s",
-            (user_id,),
-        )
-        # Fetch the user's current XP, level, and last message timestamp from the database
-        xp, level, last_message = cast(tuple[int, int, float], cursor.fetchone())
+    async with get_pool().acquire() as conn:
+        async with conn.cursor() as cursor:
+            await ensure_user_exists(cursor, user_id)
+            await cursor.execute(
+                "SELECT xp, level, last_message FROM user_info WHERE user_id = %s",
+                (user_id,),
+            )
+            xp, level, last_message = cast(
+                tuple[int, int, float], await cursor.fetchone()
+            )
 
-        # Ignore messages sent within 10 seconds of the last XP gain
-        current_time = time.time()
-        if current_time - last_message < 10:
-            return None
+            # Ignore messages sent within 10 seconds of the last XP gain
+            current_time = time.time()
+            if current_time - last_message < 10:
+                return None
 
-        # Add a random amount of XP between 10 and 20 to the user's current XP
-        new_xp = xp + random.randint(10, 20)
-        new_level, leveled_up = calculate_new_level(new_xp, level)
+            new_xp = xp + random.randint(10, 20)
+            new_level, leveled_up = calculate_new_level(new_xp, level)
 
-        # Update the database with the new XP, level, and last message timestamp
-        cursor.execute(
-            "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
-            "WHERE user_id = %s",
-            (new_xp, new_level, current_time, user_id),
-        )
-
-        return new_level if leveled_up else None
-    finally:
-        cursor.close()
+            await cursor.execute(
+                "UPDATE user_info SET xp = %s, level = %s, last_message = %s "
+                "WHERE user_id = %s",
+                (new_xp, new_level, current_time, user_id),
+            )
+            return new_level if leveled_up else None

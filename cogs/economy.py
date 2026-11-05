@@ -16,7 +16,7 @@ from config import (
     SMELT_SECONDS_PER_BAR,
     SMELTING,
 )
-from database import ensure_user_exists, get_cursor, get_db
+from database import ensure_user_exists, get_pool
 
 
 class Economy(commands.Cog):
@@ -44,26 +44,24 @@ class Economy(commands.Cog):
         except discord.HTTPException:
             pass
 
-    def _build_forge_embed(
+    async def _build_forge_embed(
         self, user_id: int, display_name: str
     ) -> tuple[discord.Embed, list[float]]:
         """Build the forge overview. Also returns finish times of jobs still running."""
-        cursor = get_cursor()
-        try:
-            ensure_user_exists(cursor, user_id)
-            cursor.execute(
-                "SELECT forge_count, forge_size FROM user_info WHERE user_id = %s",
-                (user_id,),
-            )
-            count, size = cast(tuple[int, int], cursor.fetchone())
-            cursor.execute(
-                "SELECT slot, bar, amount, finish_time FROM smelting "
-                "WHERE user_id = %s ORDER BY slot",
-                (user_id,),
-            )
-            jobs = cast(list[tuple[int, str, int, float]], cursor.fetchall())
-        finally:
-            cursor.close()
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, user_id)
+                await cursor.execute(
+                    "SELECT forge_count, forge_size FROM user_info WHERE user_id = %s",
+                    (user_id,),
+                )
+                count, size = cast(tuple[int, int], await cursor.fetchone())
+                await cursor.execute(
+                    "SELECT slot, bar, amount, finish_time FROM smelting "
+                    "WHERE user_id = %s ORDER BY slot",
+                    (user_id,),
+                )
+                jobs = cast(list[tuple[int, str, int, float]], await cursor.fetchall())
 
         max_size = len(FORGE_SIZE_COSTS) + 1
         count_cost = (
@@ -107,7 +105,7 @@ class Economy(commands.Cog):
     ) -> None:
         """Wait for one job to finish, then rebuild the embed from the database."""
         await asyncio.sleep(max(0, finish_time - time.time()) + 1)
-        embed, _ = self._build_forge_embed(user_id, display_name)
+        embed, _ = await self._build_forge_embed(user_id, display_name)
         try:
             await message.edit(embed=embed)
         except discord.HTTPException:
@@ -119,25 +117,23 @@ class Economy(commands.Cog):
     async def inventory(self, ctx: commands.Context[commands.Bot]) -> None:
         """Display the user's stats, equipped pickaxe, ores and bars."""
         user_id = ctx.author.id
-        cursor = get_cursor()
-        try:
-            ensure_user_exists(cursor, user_id)
-            cursor.execute(
-                "SELECT coins, pickaxe, mining_xp, mining_level "
-                "FROM user_info WHERE user_id = %s",
-                (user_id,),
-            )
-            coins, pickaxe_key, mining_xp, mining_level = cast(
-                tuple[int, str, int, int], cursor.fetchone()
-            )
-            cursor.execute(
-                "SELECT item, quantity FROM inventory "
-                "WHERE user_id = %s AND quantity > 0",
-                (user_id,),
-            )
-            rows = cast(list[tuple[str, int]], cursor.fetchall())
-        finally:
-            cursor.close()
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, user_id)
+                await cursor.execute(
+                    "SELECT coins, pickaxe, mining_xp, mining_level "
+                    "FROM user_info WHERE user_id = %s",
+                    (user_id,),
+                )
+                coins, pickaxe_key, mining_xp, mining_level = cast(
+                    tuple[int, str, int, int], await cursor.fetchone()
+                )
+                await cursor.execute(
+                    "SELECT item, quantity FROM inventory "
+                    "WHERE user_id = %s AND quantity > 0",
+                    (user_id,),
+                )
+                rows = cast(list[tuple[str, int]], await cursor.fetchall())
 
         owned: dict[str, int] = dict(rows)
 
@@ -186,55 +182,53 @@ class Economy(commands.Cog):
         user_id = ctx.author.id
         key = item.lower()
 
-        conn = get_db()
-        cursor = get_cursor()
-        try:
-            ensure_user_exists(cursor, user_id)
-            cursor.execute(
-                "SELECT item, quantity FROM inventory "
-                "WHERE user_id = %s AND quantity > 0",
-                (user_id,),
-            )
-            rows = cast(list[tuple[str, int]], cursor.fetchall())
+        total = 0
+        lines: list[str] = []
 
-            to_sell = [
-                (name, qty)
-                for name, qty in rows
-                if name in SELL_PRICES and (key == "all" or name == key)
-            ]
-            if not to_sell:
-                await ctx.send("You have nothing to sell.")
-                return
-
-            total = 0
-            lines: list[str] = []
-            conn.start_transaction()
-            try:
-                for name, qty in to_sell:
-                    cursor.execute(
-                        "UPDATE inventory SET quantity = quantity - %s "
-                        "WHERE user_id = %s AND item = %s AND quantity >= %s",
-                        (qty, user_id, name, qty),
-                    )
-                    if cursor.rowcount == 0:
-                        continue
-                    earned = qty * SELL_PRICES[name]
-                    total += earned
-                    lines.append(
-                        f"{qty:,} {self.emojis.get(name, '')} "
-                        f"{name.replace('_', ' ').title()}: {earned:,}"
-                    )
-
-                cursor.execute(
-                    "UPDATE user_info SET coins = coins + %s WHERE user_id = %s",
-                    (total, user_id),
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, user_id)
+                await cursor.execute(
+                    "SELECT item, quantity FROM inventory "
+                    "WHERE user_id = %s AND quantity > 0",
+                    (user_id,),
                 )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        finally:
-            cursor.close()
+                rows = cast(list[tuple[str, int]], await cursor.fetchall())
+
+                to_sell = [
+                    (name, qty)
+                    for name, qty in rows
+                    if name in SELL_PRICES and (key == "all" or name == key)
+                ]
+                if not to_sell:
+                    await ctx.send("You have nothing to sell.")
+                    return
+
+                await conn.begin()
+                try:
+                    for name, qty in to_sell:
+                        await cursor.execute(
+                            "UPDATE inventory SET quantity = quantity - %s "
+                            "WHERE user_id = %s AND item = %s AND quantity >= %s",
+                            (qty, user_id, name, qty),
+                        )
+                        if cursor.rowcount == 0:
+                            continue
+                        earned = qty * SELL_PRICES[name]
+                        total += earned
+                        lines.append(
+                            f"{qty:,} {self.emojis.get(name, '')} "
+                            f"{name.replace('_', ' ').title()}: {earned:,}"
+                        )
+
+                    await cursor.execute(
+                        "UPDATE user_info SET coins = coins + %s WHERE user_id = %s",
+                        (total, user_id),
+                    )
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
 
         if not lines:
             await ctx.send("You have nothing to sell.")
@@ -267,86 +261,85 @@ class Economy(commands.Cog):
         coal_needed = coal_each * amount
 
         user_id = ctx.author.id
-        conn = get_db()
-        cursor = get_cursor()
-        try:
-            ensure_user_exists(cursor, user_id)
-            cursor.execute(
-                "SELECT forge_count, forge_size FROM user_info WHERE user_id = %s",
-                (user_id,),
-            )
-            forge_count, forge_size = cast(tuple[int, int], cursor.fetchone())
-
-            if forge_count == 0:
-                await ctx.send(
-                    "You don't have a forge yet. Use `/forge` to see how to get one."
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, user_id)
+                await cursor.execute(
+                    "SELECT forge_count, forge_size FROM user_info WHERE user_id = %s",
+                    (user_id,),
                 )
-                return
-            if amount > forge_size:
-                await ctx.send(
-                    f"Your forges can only smelt {forge_size} bar(s) at a time."
-                )
-                return
+                forge_count, forge_size = cast(tuple[int, int], await cursor.fetchone())
 
-            cursor.execute(
-                "SELECT slot, finish_time FROM smelting WHERE user_id = %s",
-                (user_id,),
-            )
-            busy = dict(cast(list[tuple[int, float]], cursor.fetchall()))
-            free_slot = next(
-                (s for s in range(1, forge_count + 1) if s not in busy), None
-            )
-            if free_slot is None:
-                soonest = min(busy.values())
-                if soonest <= time.time():
+                if forge_count == 0:
                     await ctx.send(
-                        "Your forges are full, but one has finished! Use `/collect`."
+                        "You don't have a forge yet. Use `/forge` to see how to get one."
                     )
-                else:
+                    return
+                if amount > forge_size:
                     await ctx.send(
-                        f"All your forges are busy! One finishes "
-                        f"<t:{int(soonest)}:R>. Use `/collect` when it's done."
-                    )
-                return
-
-            finish_time = time.time() + SMELT_SECONDS_PER_BAR * amount
-
-            conn.start_transaction()
-            try:
-                cursor.execute(
-                    "UPDATE inventory SET quantity = quantity - %s "
-                    "WHERE user_id = %s AND item = %s AND quantity >= %s",
-                    (ore_needed, user_id, key, ore_needed),
-                )
-                ok = cursor.rowcount == 1
-
-                if ok:
-                    cursor.execute(
-                        "UPDATE inventory SET quantity = quantity - %s "
-                        "WHERE user_id = %s AND item = %s AND quantity >= %s",
-                        (coal_needed, user_id, "coal", coal_needed),
-                    )
-                    ok = cursor.rowcount == 1
-
-                if not ok:
-                    conn.rollback()
-                    await ctx.send(
-                        f"You need {ore_needed:,} {key} and {coal_needed:,} coal "
-                        f"to smelt {amount:,} bar(s)."
+                        f"Your forges can only smelt {forge_size} bar(s) at a time."
                     )
                     return
 
-                cursor.execute(
-                    "INSERT INTO smelting (user_id, slot, bar, amount, finish_time) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (user_id, free_slot, bar, amount, finish_time),
+                await cursor.execute(
+                    "SELECT slot, finish_time FROM smelting WHERE user_id = %s",
+                    (user_id,),
                 )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        finally:
-            cursor.close()
+                busy = dict(cast(list[tuple[int, float]], await cursor.fetchall()))
+                free_slot = next(
+                    (s for s in range(1, forge_count + 1) if s not in busy), None
+                )
+                if free_slot is None:
+                    soonest = min(busy.values())
+                    if soonest <= time.time():
+                        await ctx.send(
+                            "Your forges are full, but one has finished! Use `/collect`."
+                        )
+                    else:
+                        await ctx.send(
+                            f"All your forges are busy! One finishes "
+                            f"<t:{int(soonest)}:R>. Use `/collect` when it's done."
+                        )
+                    return
+
+                finish_time = time.time() + SMELT_SECONDS_PER_BAR * amount
+
+                await conn.begin()
+                try:
+                    await cursor.execute(
+                        "UPDATE inventory SET quantity = quantity - %s "
+                        "WHERE user_id = %s AND item = %s AND quantity >= %s",
+                        (ore_needed, user_id, key, ore_needed),
+                    )
+                    ok = cursor.rowcount == 1
+
+                    if ok:
+                        await cursor.execute(
+                            "UPDATE inventory SET quantity = quantity - %s "
+                            "WHERE user_id = %s AND item = %s AND quantity >= %s",
+                            (coal_needed, user_id, "coal", coal_needed),
+                        )
+                        ok = cursor.rowcount == 1
+
+                    if not ok:
+                        # Must roll back before returning, or the connection
+                        # goes back to the pool with a transaction still open.
+                        await conn.rollback()
+                        await ctx.send(
+                            f"You need {ore_needed:,} {key} and {coal_needed:,} coal "
+                            f"to smelt {amount:,} bar(s)."
+                        )
+                        return
+
+                    await cursor.execute(
+                        "INSERT INTO smelting (user_id, slot, bar, amount, finish_time) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (user_id, free_slot, bar, amount, finish_time),
+                    )
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
 
         name = bar.replace("_", " ").title()
         msg = await ctx.send(
@@ -354,7 +347,7 @@ class Economy(commands.Cog):
             f"{coal_needed:,} coal into {amount:,} {name}. "
             f"Ready <t:{int(finish_time)}:R>."
         )
-        # Spawn a background task to edit the message when the job is finished
+        # Background task to edit the message when the job is finished
         self._spawn(
             self._edit_when_ready(
                 msg,
@@ -366,54 +359,44 @@ class Economy(commands.Cog):
     @commands.hybrid_command(name="collect", description="Collect finished bars.")
     async def collect(self, ctx: commands.Context[commands.Bot]) -> None:
         """Pick up the bars from every finished forge."""
-        # Get the user's ID and the current time
         user_id = ctx.author.id
         now = time.time()
 
-        # Fetch all finished smelting jobs for the user and add the bars to their inventory
-        conn = get_db()
-        cursor = get_cursor()
-        try:
-            # Fetch all finished smelting jobs for the user
-            cursor.execute(
-                "SELECT slot, bar, amount FROM smelting "
-                "WHERE user_id = %s AND finish_time <= %s",
-                (user_id, now),
-            )
-            # Fetch all finished smelting jobs for the user
-            done = cast(list[tuple[int, str, int]], cursor.fetchall())
-            if not done:
-                await ctx.send("Nothing is ready to collect.")
-                return
+        collected: dict[str, int] = {}
 
-            # Build a dictionary of collected bars and their quantities
-            collected: dict[str, int] = {}
-            conn.start_transaction()
-            try:
-                # For each finished smelting job, delete it from the smelting table and add the bars to the user's inventory
-                for slot, bar, amount in done:
-                    cursor.execute(
-                        "DELETE FROM smelting WHERE user_id = %s AND slot = %s",
-                        (user_id, slot),
-                    )
-                    if cursor.rowcount == 0:
-                        continue
-                    cursor.execute(
-                        "INSERT INTO inventory (user_id, item, quantity) "
-                        "VALUES (%s, %s, %s) "
-                        "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)",
-                        (user_id, bar, amount),
-                    )
-                    collected[bar] = collected.get(bar, 0) + amount
-                conn.commit()
-            except Exception:
-                # If any error occurs during the transaction, roll back all changes to maintain database integrity
-                conn.rollback()
-                raise
-        finally:
-            cursor.close()
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT slot, bar, amount FROM smelting "
+                    "WHERE user_id = %s AND finish_time <= %s",
+                    (user_id, now),
+                )
+                done = cast(list[tuple[int, str, int]], await cursor.fetchall())
+                if not done:
+                    await ctx.send("Nothing is ready to collect.")
+                    return
 
-        # If nothing was collected, inform the user
+                await conn.begin()
+                try:
+                    for slot, bar, amount in done:
+                        await cursor.execute(
+                            "DELETE FROM smelting WHERE user_id = %s AND slot = %s",
+                            (user_id, slot),
+                        )
+                        if cursor.rowcount == 0:
+                            continue
+                        await cursor.execute(
+                            "INSERT INTO inventory (user_id, item, quantity) "
+                            "VALUES (%s, %s, %s) "
+                            "ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity)",
+                            (user_id, bar, amount),
+                        )
+                        collected[bar] = collected.get(bar, 0) + amount
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+
         if not collected:
             await ctx.send("Nothing is ready to collect.")
             return
@@ -426,11 +409,11 @@ class Economy(commands.Cog):
     @commands.hybrid_command(name="forge", description="View your forges.")
     async def forge(self, ctx: commands.Context[commands.Bot]) -> None:
         """Show forge count, size, active jobs and upgrade costs."""
-        # Build the embed and send it to the channel
-        embed, pending = self._build_forge_embed(ctx.author.id, ctx.author.display_name)
+        embed, pending = await self._build_forge_embed(
+            ctx.author.id, ctx.author.display_name
+        )
         msg = await ctx.send(embed=embed)
 
-        # If any jobs are still running, spawn a task to refresh the embed when they finish
         for finish in pending:
             self._spawn(
                 self._refresh_forge(msg, finish, ctx.author.id, ctx.author.display_name)
@@ -439,50 +422,43 @@ class Economy(commands.Cog):
     @commands.hybrid_command(name="upgrade", description="Upgrade your forges.")
     async def upgrade(self, ctx: commands.Context[commands.Bot], kind: str) -> None:
         """Buy another forge ('number') or bigger forges ('size')."""
-        # Normalize the kind to lowercase and validate it
         kind = kind.lower()
         if kind not in ("number", "size"):
             await ctx.send("Choose `number` or `size`.")
             return
 
+        # Safe to put in an f-string: only ever one of our own two literals
         column = "forge_count" if kind == "number" else "forge_size"
 
-        # Get the user's ID and prepare to query the database
         user_id = ctx.author.id
-        cursor = get_cursor()
-        try:
-            # Ensure the user exists in the database and fetch their coins and current forge count/size
-            ensure_user_exists(cursor, user_id)
-            cursor.execute(
-                f"SELECT coins, {column} FROM user_info WHERE user_id = %s",
-                (user_id,),
-            )
-            coins, current = cast(tuple[int, int], cursor.fetchone())
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await ensure_user_exists(cursor, user_id)
+                await cursor.execute(
+                    f"SELECT coins, {column} FROM user_info WHERE user_id = %s",
+                    (user_id,),
+                )
+                coins, current = cast(tuple[int, int], await cursor.fetchone())
 
-            # Determine the cost of the next upgrade based on the current level and the type of upgrade
-            costs = FORGE_COUNT_COSTS if kind == "number" else FORGE_SIZE_COSTS
-            index = current if kind == "number" else current - 1
-            if index >= len(costs):
-                await ctx.send("That's already at the maximum level.")
-                return
+                costs = FORGE_COUNT_COSTS if kind == "number" else FORGE_SIZE_COSTS
+                index = current if kind == "number" else current - 1
+                if index >= len(costs):
+                    await ctx.send("That's already at the maximum level.")
+                    return
 
-            # Determine the cost of the next upgrade and check if the user has enough coins
-            cost = costs[index]
-            if coins < cost:
-                await ctx.send(f"You need ${cost:,} but only have ${coins:,}.")
-                return
+                cost = costs[index]
+                if coins < cost:
+                    await ctx.send(f"You need ${cost:,} but only have ${coins:,}.")
+                    return
 
-            # Update the database to deduct coins and increase the forge count or size
-            cursor.execute(
-                f"UPDATE user_info SET coins = coins - %s, {column} = {column} + 1 "
-                f"WHERE user_id = %s AND coins >= %s AND {column} = %s",
-                (cost, user_id, cost, current),
-            )
-            if cursor.rowcount == 0:
-                await ctx.send("Upgrade failed, try again.")
-                return
-        finally:
-            cursor.close()
+                await cursor.execute(
+                    f"UPDATE user_info SET coins = coins - %s, {column} = {column} + 1 "
+                    f"WHERE user_id = %s AND coins >= %s AND {column} = %s",
+                    (cost, user_id, cost, current),
+                )
+                if cursor.rowcount == 0:
+                    await ctx.send("Upgrade failed, try again.")
+                    return
 
         await ctx.send(f"Upgraded forge {kind} to **{current + 1}** for ${cost:,}!")
 
