@@ -4,6 +4,7 @@ from collections.abc import Coroutine
 from typing import Any, cast
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from config import (
@@ -241,6 +242,31 @@ class Economy(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @sell.autocomplete("item")
+    async def sell_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest 'all' plus the sellable items this user actually has."""
+        async with get_pool().acquire() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT item, quantity FROM inventory "
+                    "WHERE user_id = %s AND quantity > 0",
+                    (interaction.user.id,),
+                )
+                rows = cast(list[tuple[str, int]], await cursor.fetchall())
+
+        current = current.lower()
+        choices = [app_commands.Choice(name="All", value="all")]
+        choices += [
+            app_commands.Choice(
+                name=f"{name.replace('_', ' ').title()} ({qty:,})", value=name
+            )
+            for name, qty in rows
+            if name in SELL_PRICES
+        ]
+        return [c for c in choices if current in c.value][:25]
+
     @commands.hybrid_command(name="smelt", description="Smelt ore into bars.")
     async def smelt(
         self, ctx: commands.Context[commands.Bot], ore: str, amount: int = 1
@@ -355,6 +381,17 @@ class Economy(commands.Cog):
                 f"Forge {free_slot} finished {amount:,} {name}! Use `/collect`.",
             )
         )
+
+    @smelt.autocomplete("ore")
+    async def smelt_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        current = current.lower()
+        return [
+            app_commands.Choice(name=ore.title(), value=ore)
+            for ore in SMELTING
+            if current in ore
+        ]
 
     @commands.hybrid_command(name="collect", description="Collect finished bars.")
     async def collect(self, ctx: commands.Context[commands.Bot]) -> None:

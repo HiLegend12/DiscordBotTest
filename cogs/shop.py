@@ -2,6 +2,7 @@ from typing import cast
 
 import discord
 from discord.ext import commands
+from discord import app_commands
 
 from config import PICKAXES
 from database import ensure_user_exists, get_pool
@@ -90,6 +91,17 @@ class Shop(commands.Cog):
         # Outside the DB block so the connection isn't held while talking to Discord
         await ctx.send(f"You bought the **{item['name']}**!")
 
+    @buy.autocomplete("pickaxe")
+    async def buy_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Suggest pickaxes whose name or key matches what the user has typed."""
+        current = current.lower()
+        return [
+            app_commands.Choice(name=f"{p['name']} ({p['price']:,} coins)", value=key)
+            for key, p in PICKAXES.items()
+            if p["tier"] > 0 and (current in key or current in p["name"].lower())
+        ]
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Shop(bot))
