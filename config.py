@@ -3,12 +3,15 @@ import discord
 from dotenv import load_dotenv
 from typing import TypedDict
 
+
 class Pickaxe(TypedDict):
     name: str
+    description: str
     tier: int
     price: int
     center: float
     spread: float
+
 
 load_dotenv()
 
@@ -52,9 +55,17 @@ ORES: dict[str, tuple[int, int, float]] = {
     "diamond": (200, 4, 5),
 }
 PICKAXES: dict[str, Pickaxe] = {
-    "hand": {"name": "Bare Hands", "tier": 0, "price": 0, "center": 0.0, "spread": 1.0},
+    "hand": {
+        "name": "Bare Hands",
+        "description": "Your Hands",
+        "tier": 0,
+        "price": 0,
+        "center": 0.0,
+        "spread": 1.0,
+    },
     "wooden": {
         "name": "Wooden Pickaxe",
+        "description": "A basic wooden pickaxe.",
         "tier": 1,
         "price": 50,
         "center": 0.7,
@@ -62,6 +73,7 @@ PICKAXES: dict[str, Pickaxe] = {
     },
     "stone": {
         "name": "Stone Pickaxe",
+        "description": "A sturdy stone pickaxe.",
         "tier": 2,
         "price": 250,
         "center": 1.3,
@@ -69,6 +81,7 @@ PICKAXES: dict[str, Pickaxe] = {
     },
     "copper": {
         "name": "Copper Pickaxe",
+        "description": "A shiny copper pickaxe.",
         "tier": 3,
         "price": 500,
         "center": 1.8,
@@ -76,6 +89,7 @@ PICKAXES: dict[str, Pickaxe] = {
     },
     "iron": {
         "name": "Iron Pickaxe",
+        "description": "A strong iron pickaxe.",
         "tier": 4,
         "price": 1000,
         "center": 2.3,
@@ -83,6 +97,7 @@ PICKAXES: dict[str, Pickaxe] = {
     },
     "diamond": {
         "name": "Diamond Pickaxe",
+        "description": "A rare diamond pickaxe.",
         "tier": 5,
         "price": 5000,
         "center": 3.5,

@@ -21,7 +21,7 @@ from database import ensure_user_exists, get_pool
 
 
 class Economy(commands.Cog):
-    """Inventory, selling, smelting and forges."""
+    """Profile, selling, smelting and forges."""
 
     def __init__(self, bot: commands.Bot) -> None:
         """Initialize the Economy cog with the bot instance."""
@@ -113,9 +113,9 @@ class Economy(commands.Cog):
             pass
 
     @commands.hybrid_command(
-        name="inventory", description="View your inventory.", aliases=["inv"]
+        name="profile", description="View your profile.", aliases=["pf"]
     )
-    async def inventory(self, ctx: commands.Context[commands.Bot]) -> None:
+    async def profile(self, ctx: commands.Context[commands.Bot]) -> None:
         """Display the user's stats, equipped pickaxe, ores and bars."""
         user_id = ctx.author.id
         async with get_pool().acquire() as conn:
@@ -169,7 +169,7 @@ class Economy(commands.Cog):
         )
 
         embed = discord.Embed(
-            title=f"Inventory of {ctx.author.display_name}",
+            title=f"Profile of {ctx.author.display_name}",
             description=description,
             color=discord.Color.dark_gold(),
         )
@@ -282,11 +282,13 @@ class Economy(commands.Cog):
             await ctx.send("Amount must be at least 1.")
             return
 
+        # Unpack the recipe and calculate the total ore and coal needed
         bar, ore_each, coal_each, _ = recipe
         ore_needed = ore_each * amount
         coal_needed = coal_each * amount
 
         user_id = ctx.author.id
+        # Check if the user has a forge, enough free slots, and enough ore and coal
         async with get_pool().acquire() as conn:
             async with conn.cursor() as cursor:
                 await ensure_user_exists(cursor, user_id)
@@ -301,6 +303,7 @@ class Economy(commands.Cog):
                         "You don't have a forge yet. Use `/forge` to see how to get one."
                     )
                     return
+                # Check if the user has enough ore and coal
                 if amount > forge_size:
                     await ctx.send(
                         f"Your forges can only smelt {forge_size} bar(s) at a time."
@@ -315,6 +318,7 @@ class Economy(commands.Cog):
                 free_slot = next(
                     (s for s in range(1, forge_count + 1) if s not in busy), None
                 )
+                # If all slots are busy, check if any have finished
                 if free_slot is None:
                     soonest = min(busy.values())
                     if soonest <= time.time():
@@ -332,6 +336,7 @@ class Economy(commands.Cog):
 
                 await conn.begin()
                 try:
+                    # Deduct the required ore from the user's inventory
                     await cursor.execute(
                         "UPDATE inventory SET quantity = quantity - %s "
                         "WHERE user_id = %s AND item = %s AND quantity >= %s",
@@ -340,6 +345,7 @@ class Economy(commands.Cog):
                     ok = cursor.rowcount == 1
 
                     if ok:
+                        # Check for coal availability
                         await cursor.execute(
                             "UPDATE inventory SET quantity = quantity - %s "
                             "WHERE user_id = %s AND item = %s AND quantity >= %s",
@@ -348,9 +354,7 @@ class Economy(commands.Cog):
                         ok = cursor.rowcount == 1
 
                     if not ok:
-                        # Must roll back before returning, or the connection
-                        # goes back to the pool with a transaction still open.
-                        await conn.rollback()
+                        # Rollback if either the ore or coal update failed (not enough quantity)
                         await ctx.send(
                             f"You need {ore_needed:,} {key} and {coal_needed:,} coal "
                             f"to smelt {amount:,} bar(s)."

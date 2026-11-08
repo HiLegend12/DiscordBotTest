@@ -5,6 +5,8 @@ import discord
 from aiohttp import web
 from discord.ext import commands
 
+from pathlib import Path
+
 from config import BOT_TOKEN, MY_GUILD
 from database import close_pool, init_pool
 
@@ -13,14 +15,15 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-EXTENSIONS: tuple[str, ...] = (
-    "cogs.general",
-    "cogs.admin",
-    "cogs.xp",
-    "cogs.mining",
-    "cogs.shop",
-    "cogs.economy",
-)
+
+def discover_extensions() -> list[str]:
+    """Return the module path of every cog file in the cogs/ folder."""
+    cogs_dir = Path(__file__).parent / "cogs"
+    return [
+        f"cogs.{file.stem}"
+        for file in sorted(cogs_dir.glob("*.py"))
+        if not file.name.startswith("_")
+    ]
 
 
 # --- DUMMY WEB SERVER TO SATISFY RENDER FREE TIER ---
@@ -73,7 +76,7 @@ async def main() -> None:
 
     try:
         # Load each Cog file.
-        for extension in EXTENSIONS:
+        for extension in discover_extensions():
             await bot.load_extension(extension)
             print(f"Loaded {extension}")
 
